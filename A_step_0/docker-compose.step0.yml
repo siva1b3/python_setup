@@ -1,0 +1,16 @@
+name: flightdeck-app
+
+networks:
+  flightdeck-network:
+    external: true
+
+services:
+  simulator:
+    image: python:3.14-slim-bookworm
+    container_name: flightdeck-simulator
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    command: bash
+    networks:
+      - flightdeck-network
