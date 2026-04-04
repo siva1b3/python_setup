@@ -1,0 +1,14 @@
+name: flightdeck-app
+
+services:
+  simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: flightdeck-simulator:step_0
+    container_name: flightdeck-simulator
+    working_dir: /app
+    stdin_open: true
+    tty: true
+    environment:
+      - PYTHON_ENV=development

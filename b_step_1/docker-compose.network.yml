@@ -1,0 +1,14 @@
+name: flightdeck-network-placeholder
+
+networks:
+  flightdeck-network:
+    name: flightdeck-network
+    driver: bridge
+
+services:
+  gateway:
+    image: nginx:alpine
+    container_name: flightdeck-gateway
+    restart: unless-stopped
+    networks:
+      - flightdeck-network
