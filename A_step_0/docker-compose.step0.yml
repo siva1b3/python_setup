@@ -8,9 +8,18 @@ services:
   simulator:
     image: python:3.14-slim-bookworm
     container_name: flightdeck-simulator
-    working_dir: /workspace
+    working_dir: /app
     stdin_open: true
     tty: true
-    command: bash
+    command: >
+      bash -c "
+        apt-get update -qq && 
+        apt install git curl wget tree -y && 
+        curl -LsSf https://astral.sh/uv/install.sh | sh && 
+        cd /app &&
+        git clone https://github.com/siva1b3/python_setup.git  && tail -f /dev/null
+      "
     networks:
       - flightdeck-network
+    environment:
+      - PYTHON_ENV=development
