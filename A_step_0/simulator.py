@@ -4,10 +4,50 @@ FlightDeck Event Simulator
 Generates synthetic aerospace operational events for testing.
 
 Usage:
-    python simulator.py --mode burst --count 100 --dry-run
-    python simulator.py --mode stream --rate 5 --dry-run
-    python simulator.py --mode burst --count 1000 --target http://localhost:8000/api/events/
-    python simulator.py --mode stream --rate 10 --target http://localhost:8000/api/events/
+    # ── SETUP (first time only) ──────────────────────────────
+    uv sync
+
+    # ── BURST MODE ───────────────────────────────────────────
+
+    # Quick test — 10 events, print only
+    uv run simulator.py --mode burst --count 10 --dry-run
+
+    # Medium test — verify 70/20/10 distribution
+    uv run simulator.py --mode burst --count 100 --dry-run
+
+    # Distribution validation — 1000 events
+    uv run simulator.py --mode burst --count 1000 --dry-run
+
+    # Large burst — 5000 events (used in Step 4 for stress testing)
+    uv run simulator.py --mode burst --count 5000 --dry-run
+
+    # Send to API (Step 1+)
+    uv run simulator.py --mode burst --count 100 --target http://localhost:8000/api/events/
+    uv run simulator.py --mode burst --count 1000 --target http://localhost:8000/api/events/
+    uv run simulator.py --mode burst --count 5000 --target http://localhost:8000/api/events/
+
+    # ── STREAM MODE ──────────────────────────────────────────
+
+    # Slow stream — 1 event/sec, good for watching logs
+    uv run simulator.py --mode stream --rate 1 --dry-run
+
+    # Default stream — 5 events/sec
+    uv run simulator.py --mode stream --rate 5 --dry-run
+
+    # Fast stream — 10 events/sec
+    uv run simulator.py --mode stream --rate 10 --dry-run
+
+    # Heavy stream — 50 events/sec (Step 4+ stress testing)
+    uv run simulator.py --mode stream --rate 50 --dry-run
+
+    # Stream to API (Step 1+)
+    uv run simulator.py --mode stream --rate 5 --target http://localhost:8000/api/events/
+    uv run simulator.py --mode stream --rate 10 --target http://localhost:8000/api/events/
+
+    # ── VERIFY ───────────────────────────────────────────────
+
+    # Single event — inspect full JSON
+    uv run python -c "from simulator import generate_event; import json; print(json.dumps(generate_event(), indent=2))"
 """
 
 import argparse
