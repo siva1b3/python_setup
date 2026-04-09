@@ -1,0 +1,25 @@
+name: django-app
+
+networks:
+  django-network:
+    external: true
+
+services:
+  simulator:
+    image: python:3.14-slim-bookworm
+    container_name: django-simulator
+    working_dir: /app
+    stdin_open: true
+    tty: true
+    command: >
+      bash -c "
+        apt-get update -qq && 
+        apt install git curl wget tree -y && 
+        curl -LsSf https://astral.sh/uv/install.sh | sh && 
+        cd /app &&
+        git clone https://github.com/siva1b3/python_setup.git  && tail -f /dev/null
+      "
+    networks:
+      - django-network
+    environment:
+      - PYTHON_ENV=development
