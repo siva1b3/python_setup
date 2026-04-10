@@ -1,4 +1,4 @@
-name: django-app
+name: django-learning
 
 networks:
   django-network:
@@ -7,19 +7,50 @@ networks:
 services:
   simulator:
     image: python:3.14-slim-bookworm
-    container_name: django-simulator
+    container_name: django-lab-simulator
     working_dir: /app
     stdin_open: true
     tty: true
     command: >
       bash -c "
-        apt-get update -qq && 
-        apt install git curl wget tree -y && 
-        curl -LsSf https://astral.sh/uv/install.sh | sh && 
+        apt-get update -qq &&
+        apt install git curl wget tree -y &&
+        curl -LsSf https://astral.sh/uv/install.sh | sh &&
         cd /app &&
-        git clone https://github.com/siva1b3/python_setup.git  && tail -f /dev/null
+        git clone https://github.com/siva1b3/python_setup.git && tail -f /dev/null
       "
     networks:
       - django-network
     environment:
       - PYTHON_ENV=development
+    depends_on:
+      django-lab-db:
+        condition: service_healthy
+
+  django-lab-db:
+    image: postgres:18-bookworm
+    container_name: django-learning-postgres
+    networks:
+      - django-network
+    environment:
+      POSTGRES_DB: django_lab
+      POSTGRES_USER: lab_user
+      POSTGRES_PASSWORD: lab_pass
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U lab_user -d django_lab" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  pgweb-view-db:
+    image: sosedoff/pgweb:0.17.0
+    container_name: django-learning-pgweb
+    networks:
+      - django-network
+    ports:
+      - "8081:8081"
+    environment:
+      - DATABASE_URL=postgres://lab_user:lab_pass@django-learning-postgres:5432/django_lab?sslmode=disable
+    depends_on:
+      django-lab-db:
+        condition: service_healthy
