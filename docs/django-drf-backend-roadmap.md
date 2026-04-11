@@ -107,9 +107,9 @@ Each part is 2–3 sentences maximum.
 
 ### Current status
 
-**Last completed step: 0**
+**Last completed step: 9** (completed Phase A)
 
-**Next step to write: 1** (start of Phase A)
+**Next step to write: 10** (start of Phase B)
 
 ---
 
