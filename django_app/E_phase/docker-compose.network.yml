@@ -1,0 +1,14 @@
+name: django-network-placeholder
+
+networks:
+  django-network:
+    name: django-network
+    driver: bridge
+
+services:
+  gateway:
+    image: nginx:alpine
+    container_name: django-gateway
+    restart: unless-stopped
+    networks:
+      - django-network
