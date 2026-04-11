@@ -16,7 +16,6 @@ services:
         apt-get update -qq &&
         apt install git curl wget tree -y &&
         curl -LsSf https://astral.sh/uv/install.sh | sh &&
-        uv tool install posting && 
         cd /app &&
         git clone https://github.com/siva1b3/python_setup.git && tail -f /dev/null
       "
@@ -38,7 +37,7 @@ services:
       POSTGRES_USER: lab_user
       POSTGRES_PASSWORD: lab_pass
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lab_user -d django_lab"]
+      test: [ "CMD-SHELL", "pg_isready -U lab_user -d django_lab" ]
       interval: 5s
       timeout: 3s
       retries: 5
