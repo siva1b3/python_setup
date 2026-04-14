@@ -1,0 +1,79 @@
+name: etl-pipeline
+
+networks:
+  django-network:
+    name: django-network
+    external: true
+
+services:
+
+  etl-zookeeper:
+    image: confluentinc/cp-zookeeper:7.9.6
+    container_name: etl-zookeeper
+    restart: unless-stopped
+    networks:
+      - django-network
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: [ "CMD", "bash", "-c", "curl -sf http://localhost:8080/commands/ruok | grep ruok" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  etl-kafka:
+    image: confluentinc/cp-kafka:7.9.6
+    container_name: etl-kafka
+    restart: unless-stopped
+    networks:
+      - django-network
+    ports:
+      - "9092:9092"
+    depends_on:
+      etl-zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: etl-zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://etl-kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: [ "CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092" ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  etl-dozzle:
+    image: amir20/dozzle:v10
+    container_name: etl-dozzle
+    restart: unless-stopped
+    networks:
+      - django-network
+    ports:
+      - "8888:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      DOZZLE_FILTER: "name=etl-"
+
+  etl-kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.4.2
+    container_name: etl-kafka-ui
+    restart: unless-stopped
+    networks:
+      - django-network
+    ports:
+      - "8889:8080"
+    depends_on:
+      etl-kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: etl-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: etl-kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: etl-zookeeper:2181
