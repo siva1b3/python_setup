@@ -3,4 +3,4 @@ docker exec etl-kafka kafka-topics --bootstrap-server localhost:9092  --create -
 
 docker exec etl-kafka kafka-topics  --bootstrap-server localhost:9092  --create --topic image-events  --partitions 1  --replication-factor 1
 
-docker exec etl-kafka kafka-topics  --bootstrap-server localhost:9092  --list`
+docker exec etl-kafka kafka-topics  --bootstrap-server localhost:9092  --list
