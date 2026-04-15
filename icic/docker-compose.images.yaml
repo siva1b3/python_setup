@@ -1,0 +1,49 @@
+name: etl-pipeline-images
+
+networks:
+  etl-network:
+    name: etl-network
+    external: true
+
+volumes:
+  images-data:
+    name: images-data
+
+services:
+  etl-image-gen:
+    image: python:3.14-slim-bookworm
+    container_name: etl-image-gen
+    networks:
+      - etl-network
+    volumes:
+      - images-data:/data/images
+    restart: "no"
+    command:
+      - bash
+      - -c
+      - |
+        pip install pillow numpy --quiet
+        python - <<'EOF'
+        import os, random
+        import numpy as np
+        from PIL import Image
+
+        os.makedirs('/data/images', exist_ok=True)
+
+        for i in range(100):
+            width  = random.randint(200, 1000)
+            height = random.randint(200, 1000)
+            mode   = random.choice(['RGB', 'L'])
+
+            if mode == 'RGB':
+                arr = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
+            else:
+                arr = np.random.randint(0, 255, (height, width), dtype=np.uint8)
+
+            img   = Image.fromarray(arr, mode=mode)
+            fname = f'/data/images/img-{i:03d}.png'
+            img.save(fname)
+            print(f'[{i+1:03d}/100] {fname}  {width}x{height}  {mode}')
+
+        print('Done. 100 images created.')
+        EOF
