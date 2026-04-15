@@ -1,14 +1,14 @@
-name: django-network-placeholder
+name: etl-pipeline-network-placeholder
 
 networks:
-  django-network:
-    name: django-network
+  etl-network:
+    name: etl-network
     driver: bridge
 
 services:
-  gateway:
+  etl-gateway:
     image: nginx:alpine
-    container_name: django-gateway
+    container_name: etl-gateway
     restart: unless-stopped
     networks:
-      - django-network
+      - etl-network
