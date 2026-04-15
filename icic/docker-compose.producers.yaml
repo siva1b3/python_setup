@@ -1,0 +1,160 @@
+name: etl-pipeline-producers
+
+networks:
+  etl-network:
+    name: etl-network
+    external: true
+
+volumes:
+  images-data:
+    external: true
+
+services:
+
+  # ─── Producer 1 — Text Events ───────────────────────────────────────────────
+  etl-producer1:
+    image: python:3.14-slim-bookworm
+    container_name: etl-producer1
+    networks:
+      - etl-network
+    restart: "no"
+    environment:
+      KAFKA_BROKER: etl-kafka:9092
+      TEXT_TOPIC: text-events
+    command:
+      - bash
+      - -c
+      - |
+        pip install confluent-kafka --quiet
+        python - <<'EOF'
+        import os, json, time, random
+        from confluent_kafka import Producer
+
+        BROKER = os.environ["KAFKA_BROKER"]
+        TOPIC  = os.environ["TEXT_TOPIC"]
+
+        producer = Producer({"bootstrap.servers": BROKER})
+
+        SOURCES    = ["news-scraper", "rss-feed", "web-crawler"]
+        CATEGORIES = ["technology", "science", "politics", "sports", "health"]
+        TAGS_POOL  = ["ai", "research", "climate", "election", "space", "health", "data"]
+
+        TITLES = [
+            "New AI model released by research lab",
+            "Scientists discover new exoplanet",
+            "Election results finalized in three states",
+            "Team wins championship after decade",
+            "Study links diet to cognitive performance",
+            "Spacecraft completes Mars orbit insertion",
+            "Open source framework reaches version 2.0",
+            "Global temperatures hit record high",
+            "New battery technology doubles EV range",
+            "Researchers map complete neural connectome",
+        ]
+
+        def delivery_report(err, msg):
+            if err:
+                print(f"[ERROR] Delivery failed: {err}")
+            else:
+                print(f"[OK] topic={msg.topic()} partition={msg.partition()} offset={msg.offset()}")
+
+        for i in range(100):
+            title = random.choice(TITLES)
+            words = random.randint(80, 400)
+            event = {
+                "event_id":   f"evt-text-{i:03d}",
+                "timestamp":  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "source":     random.choice(SOURCES),
+                "language":   "en",
+                "category":   random.choice(CATEGORIES),
+                "title":      title,
+                "content":    f"Sample content for event {i:03d}. " * (words // 10),
+                "word_count": words,
+                "tags":       random.sample(TAGS_POOL, k=random.randint(2, 4)),
+            }
+            producer.produce(
+                TOPIC,
+                key=event["event_id"],
+                value=json.dumps(event),
+                callback=delivery_report,
+            )
+            producer.poll(0)
+            print(f"[{i+1:03d}/100] produced -> {event['event_id']}")
+            time.sleep(0.2)
+
+        producer.flush()
+        print("Producer 1 done. 100 text events sent.")
+        EOF
+
+  # ─── Producer 2 — Image Events ──────────────────────────────────────────────
+  etl-producer2:
+    image: python:3.14-slim-bookworm
+    container_name: etl-producer2
+    networks:
+      - etl-network
+    volumes:
+      - images-data:/data/images
+    restart: "no"
+    environment:
+      KAFKA_BROKER: etl-kafka:9092
+      IMAGE_TOPIC: image-events
+      IMAGE_LOCAL_PATH: /data/images
+    command:
+      - bash
+      - -c
+      - |
+        pip install confluent-kafka --quiet
+        python - <<'EOF'
+        import os, json, time, random
+        from pathlib import Path
+        from confluent_kafka import Producer
+
+        BROKER    = os.environ["KAFKA_BROKER"]
+        TOPIC     = os.environ["IMAGE_TOPIC"]
+        IMAGE_DIR = Path(os.environ["IMAGE_LOCAL_PATH"])
+
+        producer = Producer({"bootstrap.servers": BROKER})
+
+        SOURCES = ["satellite-feed", "drone-capture", "ground-camera"]
+
+        images = sorted(IMAGE_DIR.glob("*.png"))
+        if not images:
+            raise RuntimeError(f"No images found in {IMAGE_DIR}")
+
+        print(f"Found {len(images)} images in {IMAGE_DIR}")
+
+        def delivery_report(err, msg):
+            if err:
+                print(f"[ERROR] Delivery failed: {err}")
+            else:
+                print(f"[OK] topic={msg.topic()} partition={msg.partition()} offset={msg.offset()}")
+
+        for i, img_path in enumerate(images):
+            stat = img_path.stat()
+            event = {
+                "event_id":   f"evt-img-{i:03d}",
+                "timestamp":  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "source":     random.choice(SOURCES),
+                "image_id":   img_path.stem,
+                "file_path":  str(img_path),
+                "format":     img_path.suffix.lstrip(".").upper(),
+                "size_bytes": stat.st_size,
+                "location": {
+                    "lat": round(random.uniform(8.0,  37.0), 4),
+                    "lon": round(random.uniform(68.0, 97.0), 4),
+                },
+                "tags": random.sample(["remote-sensing", "urban", "rural", "daytime", "nighttime", "sar", "optical"], k=3),
+            }
+            producer.produce(
+                TOPIC,
+                key=event["event_id"],
+                value=json.dumps(event),
+                callback=delivery_report,
+            )
+            producer.poll(0)
+            print(f"[{i+1:03d}/{len(images)}] produced -> {event['event_id']}  file={img_path.name}")
+            time.sleep(0.2)
+
+        producer.flush()
+        print(f"Producer 2 done. {len(images)} image events sent.")
+        EOF

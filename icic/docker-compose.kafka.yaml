@@ -1,4 +1,4 @@
-name: etl-pipeline
+name: etl-pipeline-kafka
 
 networks:
   etl-network:
@@ -10,18 +10,6 @@ volumes:
     name: kafka-data
 
 services:
-  etl-dozzle:
-    image: amir20/dozzle:v10
-    container_name: etl-dozzle
-    restart: unless-stopped
-    networks:
-      - etl-network
-    ports:
-      - "8888:8080"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    environment:
-      DOZZLE_FILTER: "name=etl-"
 
   etl-kafka:
     image: confluentinc/cp-kafka:8.1.2

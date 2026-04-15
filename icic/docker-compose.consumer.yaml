@@ -1,0 +1,105 @@
+name: etl-pipeline-consumer
+
+networks:
+  etl-network:
+    name: etl-network
+    external: true
+
+services:
+
+  # ─── Consumer — Text + Image Events ─────────────────────────────────────────
+  etl-consumer:
+    image: python:3.14-slim-bookworm
+    container_name: etl-consumer
+    networks:
+      - etl-network
+    restart: unless-stopped
+    environment:
+      KAFKA_BROKER: etl-kafka:9092
+      TEXT_TOPIC: text-events
+      IMAGE_TOPIC: image-events
+      CONSUMER_GROUP: etl-consumer-group
+    command:
+      - bash
+      - -c
+      - |
+        pip install confluent-kafka --quiet
+        python - <<'EOF'
+        import os, json, signal, sys
+        from confluent_kafka import Consumer, KafkaError
+
+        BROKER         = os.environ["KAFKA_BROKER"]
+        TEXT_TOPIC     = os.environ["TEXT_TOPIC"]
+        IMAGE_TOPIC    = os.environ["IMAGE_TOPIC"]
+        CONSUMER_GROUP = os.environ["CONSUMER_GROUP"]
+
+        consumer = Consumer({
+            "bootstrap.servers":  BROKER,
+            "group.id":           CONSUMER_GROUP,
+            "auto.offset.reset":  "earliest",
+            "enable.auto.commit": True,
+        })
+
+        consumer.subscribe([TEXT_TOPIC, IMAGE_TOPIC])
+
+        def shutdown(sig, frame):
+            print("\n[STOP] Signal received. Closing consumer...", flush=True)
+            consumer.close()
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, shutdown)
+        signal.signal(signal.SIGINT,  shutdown)
+
+        print(f"[START] Subscribed to topics: {TEXT_TOPIC}, {IMAGE_TOPIC}", flush=True)
+        print(f"[START] Consumer group: {CONSUMER_GROUP}", flush=True)
+
+        while True:
+            msg = consumer.poll(timeout=1.0)
+
+            if msg is None:
+                continue
+
+            if msg.error():
+                if msg.error().code() == KafkaError._PARTITION_EOF:
+                    print(f"[EOF] {msg.topic()} partition={msg.partition()} reached end", flush=True)
+                else:
+                    print(f"[ERROR] {msg.error()}", flush=True)
+                continue
+
+            topic = msg.topic()
+
+            try:
+                event = json.loads(msg.value().decode("utf-8"))
+            except json.JSONDecodeError as e:
+                print(f"[ERROR] Failed to parse message: {e}", flush=True)
+                continue
+
+            if topic == TEXT_TOPIC:
+                print(
+                    f"[TEXT]  "
+                    f"event_id={event.get('event_id')}  "
+                    f"title={event.get('title')}  "
+                    f"category={event.get('category')}  "
+                    f"source={event.get('source')}  "
+                    f"word_count={event.get('word_count')}  "
+                    f"tags={event.get('tags')}",
+                    flush=True,
+                )
+
+            elif topic == IMAGE_TOPIC:
+                print(
+                    f"[IMAGE] "
+                    f"event_id={event.get('event_id')}  "
+                    f"image_id={event.get('image_id')}  "
+                    f"file={event.get('file_path')}  "
+                    f"size_bytes={event.get('size_bytes')}  "
+                    f"source={event.get('source')}  "
+                    f"location={event.get('location')}  "
+                    f"tags={event.get('tags')}",
+                    flush=True,
+                )
+
+            else:
+                print(f"[UNKNOWN] topic={topic}  raw={msg.value()}", flush=True)
+
+        EOF

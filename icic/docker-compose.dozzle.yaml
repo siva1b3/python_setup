@@ -1,0 +1,20 @@
+name: etl-pipeline-dozzle
+
+networks:
+  etl-network:
+    name: etl-network
+    external: true
+
+services:
+  etl-dozzle:
+    image: amir20/dozzle:v10
+    container_name: etl-dozzle
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "8888:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      DOZZLE_FILTER: "name=etl-"
