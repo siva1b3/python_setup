@@ -1,0 +1,202 @@
+name: etl-pipeline-consumer
+
+networks:
+    etl-network:
+        name: etl-network
+        external: true
+
+services:
+
+    # ─── Consumer — Kafka → Cassandra ───────────────────────────────────────────
+    etl-consumer:
+        image: python:3.14-slim-bookworm
+        container_name: etl-consumer
+        networks:
+            - etl-network
+        restart: unless-stopped
+        environment:
+            KAFKA_BROKER: etl-kafka:9092
+            TEXT_TOPIC: text-events
+            IMAGE_TOPIC: image-events
+            CONSUMER_GROUP: etl-consumer-group
+            CASSANDRA_HOST: etl-cassandra
+            CASSANDRA_PORT: "9042"
+            CASSANDRA_KEYSPACE: etl
+            CASSANDRA_DC: dc1
+        command:
+            - bash
+            - -c
+            - |
+              pip install confluent-kafka cassandra-driver --quiet
+              python - <<'EOF'
+              import os, json, signal, sys, time
+              from datetime import datetime, timezone
+              from confluent_kafka import Consumer, KafkaError
+              from cassandra.cluster import Cluster
+              from cassandra.policies import DCAwareRoundRobinPolicy
+              from cassandra.query import ConsistencyLevel
+
+              # ─── Config ─────────────────────────────────────────────────────────
+              BROKER         = os.environ["KAFKA_BROKER"]
+              TEXT_TOPIC     = os.environ["TEXT_TOPIC"]
+              IMAGE_TOPIC    = os.environ["IMAGE_TOPIC"]
+              CONSUMER_GROUP = os.environ["CONSUMER_GROUP"]
+              CASS_HOST      = os.environ["CASSANDRA_HOST"]
+              CASS_PORT      = int(os.environ["CASSANDRA_PORT"])
+              KEYSPACE       = os.environ["CASSANDRA_KEYSPACE"]
+              LOCAL_DC       = os.environ["CASSANDRA_DC"]
+
+              # ─── Cassandra connection with retry ────────────────────────────────
+              def connect_cassandra(retries=15, delay=10):
+                  for attempt in range(1, retries + 1):
+                      try:
+                          cluster = Cluster(
+                              [CASS_HOST],
+                              port=CASS_PORT,
+                              load_balancing_policy=DCAwareRoundRobinPolicy(local_dc=LOCAL_DC),
+                              protocol_version=5,
+                              connect_timeout=10,
+                          )
+                          session = cluster.connect(KEYSPACE)
+                          session.default_consistency_level = ConsistencyLevel.LOCAL_ONE
+                          print(f"[CASS] Connected on attempt {attempt}", flush=True)
+                          return cluster, session
+                      except Exception as e:
+                          print(f"[CASS] Attempt {attempt}/{retries} failed: {e}", flush=True)
+                          time.sleep(delay)
+                  raise RuntimeError("Cassandra unreachable after all retries")
+
+              cluster, session = connect_cassandra()
+
+              # ─── Prepared statements ────────────────────────────────────────────
+              insert_text = session.prepare("""
+                  INSERT INTO text_events
+                    (event_id, event_time, source, language, category,
+                     title, content, word_count, tags, ingested_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              """)
+
+              insert_image = session.prepare("""
+                  INSERT INTO image_events
+                    (event_id, event_time, source, image_id, file_path,
+                     format, size_bytes, lat, lon, tags, ingested_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              """)
+
+              # ─── Kafka consumer ─────────────────────────────────────────────────
+              consumer = Consumer({
+                  "bootstrap.servers":  BROKER,
+                  "group.id":           CONSUMER_GROUP,
+                  "auto.offset.reset":  "earliest",
+                  "enable.auto.commit": False,
+                  "session.timeout.ms": 45000,
+                  "max.poll.interval.ms": 300000,
+              })
+              consumer.subscribe([TEXT_TOPIC, IMAGE_TOPIC])
+
+              # ─── Shutdown handler ───────────────────────────────────────────────
+              running = True
+              def shutdown(sig, frame):
+                  global running
+                  print("\n[STOP] Signal received. Shutting down...", flush=True)
+                  running = False
+
+              signal.signal(signal.SIGTERM, shutdown)
+              signal.signal(signal.SIGINT,  shutdown)
+
+              # ─── Helpers ────────────────────────────────────────────────────────
+              def parse_ts(s):
+                  return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+              def write_text(event):
+                  session.execute(insert_text, (
+                      event["event_id"],
+                      parse_ts(event["timestamp"]),
+                      event.get("source"),
+                      event.get("language"),
+                      event.get("category"),
+                      event.get("title"),
+                      event.get("content"),
+                      event.get("word_count"),
+                      set(event.get("tags", [])) or None,
+                      datetime.now(timezone.utc),
+                  ))
+
+              def write_image(event):
+                  loc = event.get("location", {}) or {}
+                  session.execute(insert_image, (
+                      event["event_id"],
+                      parse_ts(event["timestamp"]),
+                      event.get("source"),
+                      event.get("image_id"),
+                      event.get("file_path"),
+                      event.get("format"),
+                      event.get("size_bytes"),
+                      loc.get("lat"),
+                      loc.get("lon"),
+                      set(event.get("tags", [])) or None,
+                      datetime.now(timezone.utc),
+                  ))
+
+              # ─── Main loop ──────────────────────────────────────────────────────
+              print(f"[START] Subscribed to: {TEXT_TOPIC}, {IMAGE_TOPIC}", flush=True)
+              print(f"[START] Writing to Cassandra keyspace: {KEYSPACE}", flush=True)
+
+              stats = {"text": 0, "image": 0, "errors": 0}
+              last_report = time.time()
+
+              try:
+                  while running:
+                      msg = consumer.poll(timeout=1.0)
+
+                      # Periodic stats output
+                      if time.time() - last_report > 30:
+                          print(f"[STATS] text={stats['text']} image={stats['image']} errors={stats['errors']}", flush=True)
+                          last_report = time.time()
+
+                      if msg is None:
+                          continue
+
+                      if msg.error():
+                          if msg.error().code() != KafkaError._PARTITION_EOF:
+                              print(f"[KAFKA ERROR] {msg.error()}", flush=True)
+                          continue
+
+                      topic = msg.topic()
+
+                      try:
+                          event = json.loads(msg.value().decode("utf-8"))
+                      except json.JSONDecodeError as e:
+                          print(f"[PARSE ERROR] offset={msg.offset()}: {e}", flush=True)
+                          consumer.commit(message=msg, asynchronous=False)
+                          stats["errors"] += 1
+                          continue
+
+                      try:
+                          if topic == TEXT_TOPIC:
+                              write_text(event)
+                              stats["text"] += 1
+                              print(f"[TEXT→CASS] {event['event_id']}", flush=True)
+
+                          elif topic == IMAGE_TOPIC:
+                              write_image(event)
+                              stats["image"] += 1
+                              print(f"[IMG→CASS]  {event['event_id']}", flush=True)
+
+                          else:
+                              print(f"[SKIP] Unknown topic: {topic}", flush=True)
+
+                          consumer.commit(message=msg, asynchronous=False)
+
+                      except Exception as e:
+                          print(f"[WRITE ERROR] event_id={event.get('event_id')} topic={topic}: {e}", flush=True)
+                          stats["errors"] += 1
+                          # Do NOT commit — Kafka will redeliver on next poll cycle
+                          time.sleep(1)  # backoff to avoid tight error loop
+
+              finally:
+                  print(f"[FINAL STATS] text={stats['text']} image={stats['image']} errors={stats['errors']}", flush=True)
+                  consumer.close()
+                  cluster.shutdown()
+                  print("[STOP] Clean shutdown complete.", flush=True)
+              EOF
