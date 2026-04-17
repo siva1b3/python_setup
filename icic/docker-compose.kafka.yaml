@@ -8,6 +8,8 @@ networks:
 volumes:
   kafka-data:
     name: kafka-data
+  kafka-secrets:
+    name: kafka-secrets
 
 services:
 
@@ -21,6 +23,7 @@ services:
       - "9092:9092"
     volumes:
       - kafka-data:/var/lib/kafka/data
+      - kafka-secrets:/etc/kafka/secrets
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
