@@ -1,160 +1,310 @@
 name: etl-pipeline-producers
 
 networks:
-  etl-network:
-    name: etl-network
-    external: true
+    etl-network:
+        name: etl-network
+        external: true
 
 volumes:
-  images-data:
-    external: true
+    images-data:
+        external: true
 
 services:
 
-  # ─── Producer 1 — Text Events ───────────────────────────────────────────────
-  etl-producer1:
-    image: python:3.14-slim-bookworm
-    container_name: etl-producer1
-    networks:
-      - etl-network
-    restart: "no"
-    environment:
-      KAFKA_BROKER: etl-kafka:9092
-      TEXT_TOPIC: text-events
-    command:
-      - bash
-      - -c
-      - |
-        pip install confluent-kafka --quiet
-        python - <<'EOF'
-        import os, json, time, random
-        from confluent_kafka import Producer
+    # ─── Producer 1 — Text Events ───────────────────────────────────────────────
+    etl-producer1:
+        image: python:3.14-slim-bookworm
+        container_name: etl-producer1
+        networks:
+            - etl-network
+        restart: "no"
+        environment:
+            KAFKA_BROKER: etl-kafka:9092
+            TEXT_TOPIC: text-events
+            PRODUCE_RATE: "1" # messages per second
+            PRODUCE_COUNT: "1000000" # 0 = unbounded
+            PYTHONUNBUFFERED: "1"
+        command:
+            - bash
+            - -c
+            - |
+              pip install confluent-kafka --quiet
+              python - <<'EOF'
+              import os, json, time, random, sys
+              from datetime import datetime, timezone
+              from confluent_kafka import Producer
 
-        BROKER = os.environ["KAFKA_BROKER"]
-        TOPIC  = os.environ["TEXT_TOPIC"]
+              BROKER = os.environ["KAFKA_BROKER"]
+              TOPIC  = os.environ["TEXT_TOPIC"]
+              RATE   = float(os.environ.get("PRODUCE_RATE", "5"))
+              COUNT  = int(os.environ.get("PRODUCE_COUNT", "100"))
 
-        producer = Producer({"bootstrap.servers": BROKER})
+              if RATE <= 0:
+                  raise ValueError("PRODUCE_RATE must be > 0")
+              INTERVAL = 1.0 / RATE
 
-        SOURCES    = ["news-scraper", "rss-feed", "web-crawler"]
-        CATEGORIES = ["technology", "science", "politics", "sports", "health"]
-        TAGS_POOL  = ["ai", "research", "climate", "election", "space", "health", "data"]
+              def log(level, msg):
+                  ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+                  print(f"[{ts}] [{level:5s}] [P1-text] {msg}", flush=True)
 
-        TITLES = [
-            "New AI model released by research lab",
-            "Scientists discover new exoplanet",
-            "Election results finalized in three states",
-            "Team wins championship after decade",
-            "Study links diet to cognitive performance",
-            "Spacecraft completes Mars orbit insertion",
-            "Open source framework reaches version 2.0",
-            "Global temperatures hit record high",
-            "New battery technology doubles EV range",
-            "Researchers map complete neural connectome",
-        ]
+              producer = Producer({
+                  "bootstrap.servers": BROKER,
+                  "linger.ms": 0,
+                  "enable.idempotence": True,
+                  "client.id": "etl-producer1",
+              })
 
-        def delivery_report(err, msg):
-            if err:
-                print(f"[ERROR] Delivery failed: {err}")
-            else:
-                print(f"[OK] topic={msg.topic()} partition={msg.partition()} offset={msg.offset()}")
+              SOURCES    = ["news-scraper", "rss-feed", "web-crawler"]
+              CATEGORIES = ["technology", "science", "politics", "sports", "health"]
+              TAGS_POOL  = ["ai", "research", "climate", "election", "space", "health", "data"]
+              TITLES     = [
+                  "New AI model released by research lab",
+                  "Scientists discover new exoplanet",
+                  "Election results finalized in three states",
+                  "Team wins championship after decade",
+                  "Study links diet to cognitive performance",
+                  "Spacecraft completes Mars orbit insertion",
+                  "Open source framework reaches version 2.0",
+                  "Global temperatures hit record high",
+                  "New battery technology doubles EV range",
+                  "Researchers map complete neural connectome",
+              ]
 
-        for i in range(100):
-            title = random.choice(TITLES)
-            words = random.randint(80, 400)
-            event = {
-                "event_id":   f"evt-text-{i:03d}",
-                "timestamp":  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "source":     random.choice(SOURCES),
-                "language":   "en",
-                "category":   random.choice(CATEGORIES),
-                "title":      title,
-                "content":    f"Sample content for event {i:03d}. " * (words // 10),
-                "word_count": words,
-                "tags":       random.sample(TAGS_POOL, k=random.randint(2, 4)),
-            }
-            producer.produce(
-                TOPIC,
-                key=event["event_id"],
-                value=json.dumps(event),
-                callback=delivery_report,
-            )
-            producer.poll(0)
-            print(f"[{i+1:03d}/100] produced -> {event['event_id']}")
-            time.sleep(0.2)
+              sent_count      = 0
+              delivered_count = 0
+              failed_count    = 0
 
-        producer.flush()
-        print("Producer 1 done. 100 text events sent.")
-        EOF
+              def delivery_report(err, msg):
+                  global delivered_count, failed_count
+                  if err:
+                      failed_count += 1
+                      log("ERROR", f"delivery failed key={msg.key().decode()} err={err}")
+                  else:
+                      delivered_count += 1
+                      log("ACK",
+                          f"key={msg.key().decode()} "
+                          f"topic={msg.topic()} "
+                          f"partition={msg.partition()} "
+                          f"offset={msg.offset()} "
+                          f"size={len(msg.value())}B")
 
-  # ─── Producer 2 — Image Events ──────────────────────────────────────────────
-  etl-producer2:
-    image: python:3.14-slim-bookworm
-    container_name: etl-producer2
-    networks:
-      - etl-network
-    volumes:
-      - images-data:/data/images
-    restart: "no"
-    environment:
-      KAFKA_BROKER: etl-kafka:9092
-      IMAGE_TOPIC: image-events
-      IMAGE_LOCAL_PATH: /data/images
-    command:
-      - bash
-      - -c
-      - |
-        pip install confluent-kafka --quiet
-        python - <<'EOF'
-        import os, json, time, random
-        from pathlib import Path
-        from confluent_kafka import Producer
+              def build_event(i):
+                  words = random.randint(80, 400)
+                  return {
+                      "event_id":   f"evt-text-{i:06d}",
+                      "timestamp":  datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      "source":     random.choice(SOURCES),
+                      "language":   "en",
+                      "category":   random.choice(CATEGORIES),
+                      "title":      random.choice(TITLES),
+                      "content":    f"Sample content for event {i:06d}. " * (words // 10),
+                      "word_count": words,
+                      "tags":       random.sample(TAGS_POOL, k=random.randint(2, 4)),
+                  }
 
-        BROKER    = os.environ["KAFKA_BROKER"]
-        TOPIC     = os.environ["IMAGE_TOPIC"]
-        IMAGE_DIR = Path(os.environ["IMAGE_LOCAL_PATH"])
+              log("INFO", "=" * 70)
+              log("INFO", f"broker          = {BROKER}")
+              log("INFO", f"topic           = {TOPIC}")
+              log("INFO", f"rate            = {RATE} msg/s")
+              log("INFO", f"interval        = {INTERVAL*1000:.2f} ms")
+              log("INFO", f"count           = {'unbounded' if COUNT == 0 else COUNT}")
+              log("INFO", "=" * 70)
 
-        producer = Producer({"bootstrap.servers": BROKER})
+              start_wall    = time.monotonic()
+              next_deadline = time.monotonic()
+              i = 0
+              try:
+                  while COUNT == 0 or i < COUNT:
+                      event = build_event(i)
+                      payload = json.dumps(event)
+                      producer.produce(
+                          TOPIC,
+                          key=event["event_id"],
+                          value=payload,
+                          callback=delivery_report,
+                      )
+                      sent_count += 1
+                      log("SEND",
+                          f"#{i+1:04d}/{COUNT if COUNT else '∞'} "
+                          f"key={event['event_id']} "
+                          f"category={event['category']:10s} "
+                          f"size={len(payload)}B")
 
-        SOURCES = ["satellite-feed", "drone-capture", "ground-camera"]
+                      producer.poll(0)
+                      i += 1
 
-        images = sorted(IMAGE_DIR.glob("*.png"))
-        if not images:
-            raise RuntimeError(f"No images found in {IMAGE_DIR}")
+                      next_deadline += INTERVAL
+                      sleep_for = next_deadline - time.monotonic()
+                      if sleep_for > 0:
+                          time.sleep(sleep_for)
+                      else:
+                          log("WARN", f"behind schedule by {-sleep_for*1000:.1f} ms — resetting deadline")
+                          next_deadline = time.monotonic()
+              except KeyboardInterrupt:
+                  log("WARN", "interrupted")
+              finally:
+                  log("INFO", "flushing producer...")
+                  remaining = producer.flush(timeout=30)
+                  elapsed = time.monotonic() - start_wall
+                  actual_rate = sent_count / elapsed if elapsed > 0 else 0
+                  log("INFO", "=" * 70)
+                  log("INFO", f"sent      = {sent_count}")
+                  log("INFO", f"delivered = {delivered_count}")
+                  log("INFO", f"failed    = {failed_count}")
+                  log("INFO", f"unflushed = {remaining}")
+                  log("INFO", f"elapsed   = {elapsed:.2f} s")
+                  log("INFO", f"actual    = {actual_rate:.2f} msg/s (target {RATE})")
+                  log("INFO", "=" * 70)
+              EOF
 
-        print(f"Found {len(images)} images in {IMAGE_DIR}")
+    # ─── Producer 2 — Image Events ──────────────────────────────────────────────
+    etl-producer2:
+        image: python:3.14-slim-bookworm
+        container_name: etl-producer2
+        networks:
+            - etl-network
+        volumes:
+            - images-data:/data/images
+        restart: "no"
+        environment:
+            KAFKA_BROKER: etl-kafka:9092
+            IMAGE_TOPIC: image-events
+            IMAGE_LOCAL_PATH: /data/images
+            PRODUCE_RATE: "1" # messages per second
+            PRODUCE_COUNT: "1000000" # 0 = send all images once
+            PYTHONUNBUFFERED: "1"
+        command:
+            - bash
+            - -c
+            - |
+              pip install confluent-kafka --quiet
+              python - <<'EOF'
+              import os, json, time, random, sys
+              from pathlib import Path
+              from datetime import datetime, timezone
+              from confluent_kafka import Producer
 
-        def delivery_report(err, msg):
-            if err:
-                print(f"[ERROR] Delivery failed: {err}")
-            else:
-                print(f"[OK] topic={msg.topic()} partition={msg.partition()} offset={msg.offset()}")
+              BROKER    = os.environ["KAFKA_BROKER"]
+              TOPIC     = os.environ["IMAGE_TOPIC"]
+              IMAGE_DIR = Path(os.environ["IMAGE_LOCAL_PATH"])
+              RATE      = float(os.environ.get("PRODUCE_RATE", "5"))
+              COUNT     = int(os.environ.get("PRODUCE_COUNT", "0"))
 
-        for i, img_path in enumerate(images):
-            stat = img_path.stat()
-            event = {
-                "event_id":   f"evt-img-{i:03d}",
-                "timestamp":  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "source":     random.choice(SOURCES),
-                "image_id":   img_path.stem,
-                "file_path":  str(img_path),
-                "format":     img_path.suffix.lstrip(".").upper(),
-                "size_bytes": stat.st_size,
-                "location": {
-                    "lat": round(random.uniform(8.0,  37.0), 4),
-                    "lon": round(random.uniform(68.0, 97.0), 4),
-                },
-                "tags": random.sample(["remote-sensing", "urban", "rural", "daytime", "nighttime", "sar", "optical"], k=3),
-            }
-            producer.produce(
-                TOPIC,
-                key=event["event_id"],
-                value=json.dumps(event),
-                callback=delivery_report,
-            )
-            producer.poll(0)
-            print(f"[{i+1:03d}/{len(images)}] produced -> {event['event_id']}  file={img_path.name}")
-            time.sleep(0.2)
+              if RATE <= 0:
+                  raise ValueError("PRODUCE_RATE must be > 0")
+              INTERVAL = 1.0 / RATE
 
-        producer.flush()
-        print(f"Producer 2 done. {len(images)} image events sent.")
-        EOF
+              def log(level, msg):
+                  ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+                  print(f"[{ts}] [{level:5s}] [P2-img ] {msg}", flush=True)
+
+              producer = Producer({
+                  "bootstrap.servers": BROKER,
+                  "linger.ms": 0,
+                  "enable.idempotence": True,
+                  "client.id": "etl-producer2",
+              })
+
+              SOURCES = ["satellite-feed", "drone-capture", "ground-camera"]
+              TAGS_POOL = ["remote-sensing", "urban", "rural", "daytime", "nighttime", "sar", "optical"]
+
+              images = sorted(IMAGE_DIR.glob("*.png"))
+              if not images:
+                  log("ERROR", f"no images found in {IMAGE_DIR}")
+                  sys.exit(1)
+
+              total = COUNT if COUNT > 0 else len(images)
+
+              sent_count      = 0
+              delivered_count = 0
+              failed_count    = 0
+
+              def delivery_report(err, msg):
+                  global delivered_count, failed_count
+                  if err:
+                      failed_count += 1
+                      log("ERROR", f"delivery failed key={msg.key().decode()} err={err}")
+                  else:
+                      delivered_count += 1
+                      log("ACK",
+                          f"key={msg.key().decode()} "
+                          f"topic={msg.topic()} "
+                          f"partition={msg.partition()} "
+                          f"offset={msg.offset()} "
+                          f"size={len(msg.value())}B")
+
+              def build_event(i, img_path):
+                  stat = img_path.stat()
+                  return {
+                      "event_id":   f"evt-img-{i:06d}",
+                      "timestamp":  datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      "source":     random.choice(SOURCES),
+                      "image_id":   img_path.stem,
+                      "file_path":  str(img_path),
+                      "format":     img_path.suffix.lstrip(".").upper(),
+                      "size_bytes": stat.st_size,
+                      "location": {
+                          "lat": round(random.uniform(8.0,  37.0), 4),
+                          "lon": round(random.uniform(68.0, 97.0), 4),
+                      },
+                      "tags": random.sample(TAGS_POOL, k=3),
+                  }
+
+              log("INFO", "=" * 70)
+              log("INFO", f"broker          = {BROKER}")
+              log("INFO", f"topic           = {TOPIC}")
+              log("INFO", f"image_dir       = {IMAGE_DIR}")
+              log("INFO", f"images_found    = {len(images)}")
+              log("INFO", f"rate            = {RATE} msg/s")
+              log("INFO", f"interval        = {INTERVAL*1000:.2f} ms")
+              log("INFO", f"count           = {total}")
+              log("INFO", "=" * 70)
+
+              start_wall    = time.monotonic()
+              next_deadline = time.monotonic()
+              i = 0
+              try:
+                  while i < total:
+                      img_path = images[i % len(images)]
+                      event = build_event(i, img_path)
+                      payload = json.dumps(event)
+                      producer.produce(
+                          TOPIC,
+                          key=event["event_id"],
+                          value=payload,
+                          callback=delivery_report,
+                      )
+                      sent_count += 1
+                      log("SEND",
+                          f"#{i+1:04d}/{total} "
+                          f"key={event['event_id']} "
+                          f"file={img_path.name} "
+                          f"src={event['source']:15s} "
+                          f"size={event['size_bytes']}B")
+
+                      producer.poll(0)
+                      i += 1
+
+                      next_deadline += INTERVAL
+                      sleep_for = next_deadline - time.monotonic()
+                      if sleep_for > 0:
+                          time.sleep(sleep_for)
+                      else:
+                          log("WARN", f"behind schedule by {-sleep_for*1000:.1f} ms — resetting deadline")
+                          next_deadline = time.monotonic()
+              except KeyboardInterrupt:
+                  log("WARN", "interrupted")
+              finally:
+                  log("INFO", "flushing producer...")
+                  remaining = producer.flush(timeout=30)
+                  elapsed = time.monotonic() - start_wall
+                  actual_rate = sent_count / elapsed if elapsed > 0 else 0
+                  log("INFO", "=" * 70)
+                  log("INFO", f"sent      = {sent_count}")
+                  log("INFO", f"delivered = {delivered_count}")
+                  log("INFO", f"failed    = {failed_count}")
+                  log("INFO", f"unflushed = {remaining}")
+                  log("INFO", f"elapsed   = {elapsed:.2f} s")
+                  log("INFO", f"actual    = {actual_rate:.2f} msg/s (target {RATE})")
+                  log("INFO", "=" * 70)
+              EOF

@@ -30,7 +30,7 @@ services:
 
         os.makedirs('/data/images', exist_ok=True)
 
-        for i in range(100):
+        for i in range(1000):
             width  = random.randint(200, 1000)
             height = random.randint(200, 1000)
             mode   = random.choice(['RGB', 'L'])
@@ -43,7 +43,7 @@ services:
             img   = Image.fromarray(arr, mode=mode)
             fname = f'/data/images/img-{i:03d}.png'
             img.save(fname)
-            print(f'[{i+1:03d}/100] {fname}  {width}x{height}  {mode}')
+            print(f'[{i+1:03d}/1000] {fname}  {width}x{height}  {mode}')
 
-        print('Done. 100 images created.')
+        print('Done. 1000 images created.')
         EOF
