@@ -23,6 +23,8 @@ services:
             CASSANDRA_PORT: "9042"
             CASSANDRA_KEYSPACE: etl
             CASSANDRA_DC: dc1
+            STATS_INTERVAL: "30"
+            PYTHONUNBUFFERED: "1"
         command:
             - bash
             - -c
@@ -45,11 +47,32 @@ services:
               CASS_PORT      = int(os.environ["CASSANDRA_PORT"])
               KEYSPACE       = os.environ["CASSANDRA_KEYSPACE"]
               LOCAL_DC       = os.environ["CASSANDRA_DC"]
+              STATS_INTERVAL = int(os.environ.get("STATS_INTERVAL", "30"))
+
+              # ─── Logger ─────────────────────────────────────────────────────────
+              def log(level, tag, msg):
+                  ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+                  print(f"[{ts}] [{level:5s}] [{tag:9s}] {msg}", flush=True)
+
+              # ─── Banner ─────────────────────────────────────────────────────────
+              log("INFO", "BOOT", "=" * 70)
+              log("INFO", "BOOT", "ETL Consumer starting")
+              log("INFO", "BOOT", f"kafka_broker     = {BROKER}")
+              log("INFO", "BOOT", f"text_topic       = {TEXT_TOPIC}")
+              log("INFO", "BOOT", f"image_topic      = {IMAGE_TOPIC}")
+              log("INFO", "BOOT", f"consumer_group   = {CONSUMER_GROUP}")
+              log("INFO", "BOOT", f"cassandra_host   = {CASS_HOST}:{CASS_PORT}")
+              log("INFO", "BOOT", f"cassandra_ks     = {KEYSPACE}")
+              log("INFO", "BOOT", f"cassandra_dc     = {LOCAL_DC}")
+              log("INFO", "BOOT", f"stats_interval   = {STATS_INTERVAL}s")
+              log("INFO", "BOOT", "=" * 70)
 
               # ─── Cassandra connection with retry ────────────────────────────────
               def connect_cassandra(retries=15, delay=10):
+                  log("INFO", "CASS", f"connecting to {CASS_HOST}:{CASS_PORT} (keyspace={KEYSPACE})")
                   for attempt in range(1, retries + 1):
                       try:
+                          log("INFO", "CASS", f"attempt {attempt}/{retries}")
                           cluster = Cluster(
                               [CASS_HOST],
                               port=CASS_PORT,
@@ -59,46 +82,80 @@ services:
                           )
                           session = cluster.connect(KEYSPACE)
                           session.default_consistency_level = ConsistencyLevel.LOCAL_ONE
-                          print(f"[CASS] Connected on attempt {attempt}", flush=True)
+                          log("INFO", "CASS", f"TCP + session established (attempt {attempt})")
+
+                          # Real round-trip — proves the session works
+                          row = session.execute("SELECT now() FROM system.local").one()
+                          log("INFO", "CASS", f"round-trip OK, server time = {row[0]}")
+
+                          # Verify required tables exist before consuming
+                          for tbl in ("text_events", "image_events"):
+                              session.execute(f"SELECT * FROM {tbl} LIMIT 1")
+                              log("INFO", "CASS", f"table verified: {KEYSPACE}.{tbl}")
+
+                          log("INFO", "CASS", "READY — Cassandra is fully operational")
                           return cluster, session
+
                       except Exception as e:
-                          print(f"[CASS] Attempt {attempt}/{retries} failed: {e}", flush=True)
-                          time.sleep(delay)
+                          log("ERROR", "CASS", f"attempt {attempt} failed: {type(e).__name__}: {e}")
+                          if attempt < retries:
+                              log("INFO", "CASS", f"sleeping {delay}s before retry")
+                              time.sleep(delay)
+
+                  log("FATAL", "CASS", "exhausted all retries — exiting")
                   raise RuntimeError("Cassandra unreachable after all retries")
 
               cluster, session = connect_cassandra()
 
               # ─── Prepared statements ────────────────────────────────────────────
+              log("INFO", "CASS", "preparing INSERT statements")
               insert_text = session.prepare("""
                   INSERT INTO text_events
                     (event_id, event_time, source, language, category,
                      title, content, word_count, tags, ingested_at)
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               """)
-
               insert_image = session.prepare("""
                   INSERT INTO image_events
                     (event_id, event_time, source, image_id, file_path,
                      format, size_bytes, lat, lon, tags, ingested_at)
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               """)
+              log("INFO", "CASS", "prepared statements ready: insert_text, insert_image")
 
               # ─── Kafka consumer ─────────────────────────────────────────────────
+              log("INFO", "KAFKA", f"creating consumer (group={CONSUMER_GROUP})")
               consumer = Consumer({
-                  "bootstrap.servers":  BROKER,
-                  "group.id":           CONSUMER_GROUP,
-                  "auto.offset.reset":  "earliest",
-                  "enable.auto.commit": False,
-                  "session.timeout.ms": 45000,
-                  "max.poll.interval.ms": 300000,
+                  "bootstrap.servers":     BROKER,
+                  "group.id":              CONSUMER_GROUP,
+                  "auto.offset.reset":     "earliest",
+                  "enable.auto.commit":    False,
+                  "session.timeout.ms":    45000,
+                  "max.poll.interval.ms":  300000,
+                  "client.id":             "etl-consumer",
               })
-              consumer.subscribe([TEXT_TOPIC, IMAGE_TOPIC])
+              log("INFO", "KAFKA", "consumer object created (connection is lazy — happens on first poll)")
+
+              # ─── Rebalance callbacks ────────────────────────────────────────────
+              def on_assign(c, partitions):
+                  log("INFO", "REBAL", f"partitions ASSIGNED ({len(partitions)}):")
+                  for p in partitions:
+                      log("INFO", "REBAL", f"  -> topic={p.topic} partition={p.partition} offset={p.offset}")
+                  log("INFO", "KAFKA", "READY — joined group, will start receiving messages")
+
+              def on_revoke(c, partitions):
+                  log("WARN", "REBAL", f"partitions REVOKED ({len(partitions)}):")
+                  for p in partitions:
+                      log("WARN", "REBAL", f"  -> topic={p.topic} partition={p.partition}")
+
+              consumer.subscribe([TEXT_TOPIC, IMAGE_TOPIC], on_assign=on_assign, on_revoke=on_revoke)
+              log("INFO", "KAFKA", f"subscribed to topics: [{TEXT_TOPIC}, {IMAGE_TOPIC}] — waiting for partition assignment...")
 
               # ─── Shutdown handler ───────────────────────────────────────────────
               running = True
               def shutdown(sig, frame):
                   global running
-                  print("\n[STOP] Signal received. Shutting down...", flush=True)
+                  log("WARN", "SIGNAL", f"signal {sig} received — initiating graceful shutdown")
                   running = False
 
               signal.signal(signal.SIGTERM, shutdown)
@@ -139,19 +196,23 @@ services:
                   ))
 
               # ─── Main loop ──────────────────────────────────────────────────────
-              print(f"[START] Subscribed to: {TEXT_TOPIC}, {IMAGE_TOPIC}", flush=True)
-              print(f"[START] Writing to Cassandra keyspace: {KEYSPACE}", flush=True)
+              log("INFO", "MAIN", "entering poll loop")
 
-              stats = {"text": 0, "image": 0, "errors": 0}
+              stats = {"text": 0, "image": 0, "parse_err": 0, "write_err": 0}
               last_report = time.time()
+              first_message_seen = False
 
               try:
                   while running:
                       msg = consumer.poll(timeout=1.0)
 
-                      # Periodic stats output
-                      if time.time() - last_report > 30:
-                          print(f"[STATS] text={stats['text']} image={stats['image']} errors={stats['errors']}", flush=True)
+                      if time.time() - last_report > STATS_INTERVAL:
+                          log("INFO", "STATS",
+                              f"text={stats['text']} "
+                              f"image={stats['image']} "
+                              f"parse_err={stats['parse_err']} "
+                              f"write_err={stats['write_err']} "
+                              f"total={stats['text']+stats['image']}")
                           last_report = time.time()
 
                       if msg is None:
@@ -159,44 +220,79 @@ services:
 
                       if msg.error():
                           if msg.error().code() != KafkaError._PARTITION_EOF:
-                              print(f"[KAFKA ERROR] {msg.error()}", flush=True)
+                              log("ERROR", "KAFKA", f"poll error: {msg.error()}")
                           continue
 
-                      topic = msg.topic()
+                      if not first_message_seen:
+                          log("INFO", "MAIN", "first message received — pipeline is flowing")
+                          first_message_seen = True
+
+                      topic     = msg.topic()
+                      partition = msg.partition()
+                      offset    = msg.offset()
+                      key       = msg.key().decode() if msg.key() else None
+                      size      = len(msg.value()) if msg.value() else 0
+
+                      log("INFO", "RECV",
+                          f"topic={topic} partition={partition} offset={offset} key={key} size={size}B")
 
                       try:
                           event = json.loads(msg.value().decode("utf-8"))
                       except json.JSONDecodeError as e:
-                          print(f"[PARSE ERROR] offset={msg.offset()}: {e}", flush=True)
+                          log("ERROR", "PARSE",
+                              f"invalid JSON at offset={offset} partition={partition}: {e} — committing to skip")
                           consumer.commit(message=msg, asynchronous=False)
-                          stats["errors"] += 1
+                          stats["parse_err"] += 1
                           continue
 
                       try:
                           if topic == TEXT_TOPIC:
+                              t0 = time.monotonic()
                               write_text(event)
+                              dt_ms = (time.monotonic() - t0) * 1000
                               stats["text"] += 1
-                              print(f"[TEXT→CASS] {event['event_id']}", flush=True)
+                              log("INFO", "TEXT->CS",
+                                  f"id={event['event_id']} "
+                                  f"category={event.get('category', '?')} "
+                                  f"words={event.get('word_count', '?')} "
+                                  f"write={dt_ms:.1f}ms "
+                                  f"[total_text={stats['text']}]")
 
                           elif topic == IMAGE_TOPIC:
+                              t0 = time.monotonic()
                               write_image(event)
+                              dt_ms = (time.monotonic() - t0) * 1000
                               stats["image"] += 1
-                              print(f"[IMG→CASS]  {event['event_id']}", flush=True)
+                              log("INFO", "IMG->CS",
+                                  f"id={event['event_id']} "
+                                  f"file={event.get('image_id', '?')} "
+                                  f"src={event.get('source', '?')} "
+                                  f"write={dt_ms:.1f}ms "
+                                  f"[total_image={stats['image']}]")
 
                           else:
-                              print(f"[SKIP] Unknown topic: {topic}", flush=True)
+                              log("WARN", "SKIP", f"unknown topic: {topic}")
 
                           consumer.commit(message=msg, asynchronous=False)
+                          log("INFO", "COMMIT",
+                              f"offset committed: topic={topic} partition={partition} offset={offset}")
 
                       except Exception as e:
-                          print(f"[WRITE ERROR] event_id={event.get('event_id')} topic={topic}: {e}", flush=True)
-                          stats["errors"] += 1
-                          # Do NOT commit — Kafka will redeliver on next poll cycle
-                          time.sleep(1)  # backoff to avoid tight error loop
+                          stats["write_err"] += 1
+                          log("ERROR", "WRITE",
+                              f"failed event_id={event.get('event_id')} topic={topic} "
+                              f"err={type(e).__name__}: {e} — NOT committing, will retry")
+                          time.sleep(1)
 
               finally:
-                  print(f"[FINAL STATS] text={stats['text']} image={stats['image']} errors={stats['errors']}", flush=True)
+                  log("INFO", "SHUTDN", "=" * 70)
+                  log("INFO", "SHUTDN",
+                      f"final stats — text={stats['text']} image={stats['image']} "
+                      f"parse_err={stats['parse_err']} write_err={stats['write_err']}")
+                  log("INFO", "SHUTDN", "closing Kafka consumer (commits final offsets, leaves group)")
                   consumer.close()
+                  log("INFO", "SHUTDN", "shutting down Cassandra cluster connection")
                   cluster.shutdown()
-                  print("[STOP] Clean shutdown complete.", flush=True)
+                  log("INFO", "SHUTDN", "clean shutdown complete")
+                  log("INFO", "SHUTDN", "=" * 70)
               EOF
