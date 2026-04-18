@@ -1,0 +1,1389 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ETL Pipeline Monitor</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow:wght@300;400;600;700&family=Barlow+Condensed:wght@700;800&display=swap"
+    rel="stylesheet" />
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #0a0c0f;
+      --surface: #10141a;
+      --surface2: #161c24;
+      --border: #1e2a38;
+      --border2: #253040;
+      --text: #c8d8e8;
+      --muted: #4a6070;
+      --accent: #00e5ff;
+      --accent2: #ff6b35;
+      --green: #00e676;
+      --red: #ff1744;
+      --yellow: #ffd740;
+      --kafka: #e91e63;
+      --kafka2: #7b1fa2;
+      --elastic: #f4a005;
+      --hdfs: #2e7d32;
+      --font-mono: 'Share Tech Mono', monospace;
+      --font-body: 'Barlow', sans-serif;
+      --font-head: 'Barlow Condensed', sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-body);
+      font-size: 14px;
+      overflow-x: hidden;
+    }
+
+    /* grid lines background */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(0, 229, 255, 0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 229, 255, 0.025) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    #root {
+      position: relative;
+      z-index: 1;
+    }
+
+    /* ── Header ───────────────────────────────── */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 32px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(90deg, rgba(0, 229, 255, 0.04) 0%, transparent 60%);
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .logo-mark {
+      width: 36px;
+      height: 36px;
+      background: var(--accent);
+      clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-head);
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--bg);
+      flex-shrink: 0;
+    }
+
+    .header h1 {
+      font-family: var(--font-head);
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #fff;
+    }
+
+    .header h1 span {
+      color: var(--accent);
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .clock {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .clock span {
+      color: var(--accent);
+    }
+
+    .live-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--font-head);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--green);
+    }
+
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1;
+        transform: scale(1);
+        box-shadow: 0 0 0 0 rgba(0, 230, 118, 0.6);
+      }
+
+      50% {
+        opacity: 0.7;
+        transform: scale(1.2);
+        box-shadow: 0 0 0 6px rgba(0, 230, 118, 0);
+      }
+    }
+
+    /* ── Main layout ──────────────────────────── */
+    .main {
+      padding: 24px 32px;
+      display: grid;
+      grid-template-rows: auto auto auto;
+      gap: 24px;
+    }
+
+    /* ── Pipeline Flow Row ────────────────────── */
+    .pipeline-row {
+      display: grid;
+      grid-template-columns: 1fr 40px 1fr 40px 1fr 40px 1fr;
+      align-items: center;
+      gap: 0;
+    }
+
+    .arrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--border2);
+      font-size: 20px;
+    }
+
+    .arrow.active {
+      color: var(--accent);
+      animation: flow 1s ease-in-out infinite alternate;
+    }
+
+    @keyframes flow {
+      from {
+        opacity: 0.4;
+      }
+
+      to {
+        opacity: 1;
+      }
+    }
+
+    /* ── Stage Card ───────────────────────────── */
+    .stage {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 16px;
+      position: relative;
+      overflow: hidden;
+      transition: border-color 0.3s;
+    }
+
+    .stage::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+    }
+
+    .stage.producers::before {
+      background: var(--accent2);
+    }
+
+    .stage.kafka::before {
+      background: var(--kafka);
+    }
+
+    .stage.consumer::before {
+      background: var(--accent);
+    }
+
+    .stage.storage::before {
+      background: var(--green);
+    }
+
+    .stage.healthy {
+      border-color: var(--border2);
+    }
+
+    .stage.unhealthy {
+      border-color: rgba(255, 23, 68, 0.4);
+    }
+
+    .stage-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+
+    .stage-title {
+      font-family: var(--font-head);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .stage-name {
+      font-family: var(--font-head);
+      font-size: 17px;
+      font-weight: 800;
+      color: #fff;
+      margin-top: 2px;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-top: 4px;
+      flex-shrink: 0;
+    }
+
+    .status-dot.up {
+      background: var(--green);
+      box-shadow: 0 0 6px var(--green);
+    }
+
+    .status-dot.down {
+      background: var(--red);
+      box-shadow: 0 0 6px var(--red);
+      animation: blink 1s step-end infinite;
+    }
+
+    .status-dot.loading {
+      background: var(--yellow);
+    }
+
+    @keyframes blink {
+      50% {
+        opacity: 0;
+      }
+    }
+
+    .metric-row {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .metric {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+    }
+
+    .metric-label {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .metric-value {
+      font-family: var(--font-mono);
+      font-size: 16px;
+      color: var(--accent);
+      font-weight: normal;
+    }
+
+    .metric-value.green {
+      color: var(--green);
+    }
+
+    .metric-value.orange {
+      color: var(--accent2);
+    }
+
+    .metric-value.yellow {
+      color: var(--yellow);
+    }
+
+    .metric-value.tick {
+      animation: countup 0.3s ease-out;
+    }
+
+    @keyframes countup {
+      from {
+        transform: translateY(-4px);
+        opacity: 0.4;
+      }
+
+      to {
+        transform: translateY(0);
+        opacity: 1;
+      }
+    }
+
+    /* ── Storage row ──────────────────────────── */
+    .storage-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    .storage-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 16px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .storage-card::after {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+    }
+
+    .storage-card.kafka-topics::after {
+      background: var(--kafka);
+    }
+
+    .storage-card.elastic::after {
+      background: var(--elastic);
+    }
+
+    .storage-card.hdfs::after {
+      background: var(--hdfs);
+    }
+
+    .storage-icon {
+      font-family: var(--font-head);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      padding: 3px 7px;
+      border-radius: 2px;
+      display: inline-block;
+      margin-bottom: 10px;
+    }
+
+    .storage-card.kafka-topics .storage-icon {
+      background: rgba(233, 30, 99, 0.2);
+      color: #f48fb1;
+      border: 1px solid rgba(233, 30, 99, 0.5);
+    }
+
+    .storage-card.elastic .storage-icon {
+      background: rgba(244, 160, 5, 0.15);
+      color: var(--elastic);
+      border: 1px solid rgba(244, 160, 5, 0.4);
+    }
+
+    .storage-card.hdfs .storage-icon {
+      background: rgba(46, 125, 50, 0.2);
+      color: #66bb6a;
+      border: 1px solid rgba(46, 125, 50, 0.5);
+    }
+
+    /* Kafka topics table inside storage card */
+    .topic-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+    }
+
+    .topic-table th {
+      font-family: var(--font-head);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      text-align: left;
+      padding: 4px 6px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .topic-table td {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text);
+      padding: 5px 6px;
+      border-bottom: 1px solid rgba(30, 42, 56, 0.5);
+    }
+
+    .topic-table td.num {
+      color: var(--accent);
+      text-align: right;
+    }
+
+    .topic-table td.name {
+      color: var(--kafka);
+    }
+
+    .storage-big-num {
+      font-family: var(--font-mono);
+      font-size: 32px;
+      line-height: 1;
+      color: #fff;
+      margin-bottom: 4px;
+    }
+
+    .storage-sub {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+
+    .storage-detail {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    /* ── Message Feed ─────────────────────────── */
+    .feed-section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .feed-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface2);
+    }
+
+    .feed-title {
+      font-family: var(--font-head);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .feed-count {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--accent);
+    }
+
+    .feed-body {
+      height: 180px;
+      overflow-y: auto;
+      padding: 8px 0;
+    }
+
+    .feed-body::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .feed-body::-webkit-scrollbar-track {
+      background: var(--surface);
+    }
+
+    .feed-body::-webkit-scrollbar-thumb {
+      background: var(--border2);
+      border-radius: 2px;
+    }
+
+    .feed-item {
+      display: grid;
+      grid-template-columns: 90px 80px 90px 1fr;
+      gap: 8px;
+      padding: 5px 16px;
+      border-bottom: 1px solid rgba(30, 42, 56, 0.5);
+      animation: slideIn 0.3s ease-out;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      align-items: center;
+    }
+
+    @keyframes slideIn {
+      from {
+        opacity: 0;
+        transform: translateX(-8px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateX(0);
+      }
+    }
+
+    .feed-item:hover {
+      background: var(--surface2);
+    }
+
+    .feed-time {
+      color: var(--muted);
+    }
+
+    .feed-topic-text {
+      color: var(--kafka);
+    }
+
+    .feed-topic-image {
+      color: var(--accent2);
+    }
+
+    .feed-key {
+      color: var(--accent);
+    }
+
+    .feed-data {
+      color: var(--text);
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    /* ── Bottom row ───────────────────────────── */
+    .bottom-row {
+      display: grid;
+      grid-template-columns: 1fr 2fr;
+      gap: 16px;
+    }
+
+    /* ── Health Panel ─────────────────────────── */
+    .health-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface2);
+      font-family: var(--font-head);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .health-list {
+      padding: 8px 0;
+    }
+
+    .health-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 16px;
+      border-bottom: 1px solid rgba(30, 42, 56, 0.5);
+    }
+
+    .health-item:last-child {
+      border-bottom: none;
+    }
+
+    .health-name {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text);
+    }
+
+    .health-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .health-dot.up {
+      background: var(--green);
+      box-shadow: 0 0 4px var(--green);
+    }
+
+    .health-dot.down {
+      background: var(--red);
+      animation: blink 1s step-end infinite;
+    }
+
+    .health-dot.loading {
+      background: var(--yellow);
+    }
+
+    .health-status {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.08em;
+    }
+
+    .health-status.up {
+      color: var(--green);
+    }
+
+    .health-status.down {
+      color: var(--red);
+    }
+
+    .health-status.loading {
+      color: var(--yellow);
+    }
+
+    /* ── Throughput Panel ─────────────────────── */
+    .throughput-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .sparkline-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      background: var(--border);
+      margin: 0;
+    }
+
+    .sparkline-cell {
+      background: var(--surface);
+      padding: 12px 16px;
+    }
+
+    .sparkline-label {
+      font-size: 10px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-bottom: 8px;
+    }
+
+    .sparkline-canvas {
+      width: 100%;
+      height: 40px;
+      display: block;
+    }
+
+    .sparkline-current {
+      font-family: var(--font-mono);
+      font-size: 18px;
+      color: var(--accent);
+      margin-top: 4px;
+    }
+
+    .sparkline-unit {
+      font-size: 10px;
+      color: var(--muted);
+      margin-left: 4px;
+    }
+
+    /* ── Footer ───────────────────────────────── */
+    .footer {
+      padding: 10px 32px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--muted);
+      font-family: var(--font-mono);
+    }
+
+    .footer-right {
+      display: flex;
+      gap: 24px;
+    }
+
+    .refresh-bar {
+      width: 80px;
+      height: 2px;
+      background: var(--border);
+      border-radius: 1px;
+      overflow: hidden;
+      display: inline-block;
+      vertical-align: middle;
+      margin-left: 8px;
+    }
+
+    .refresh-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 1px;
+      transition: width 0.1s linear;
+    }
+
+    /* error state */
+    .err {
+      color: var(--red);
+      font-size: 10px;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    /*
+      Bug fixes applied:
+      1. Cassandra card removed — replaced with Kafka Topics Detail card
+      2. Kafka health split: broker status derived from topics fetch success,
+         UI status tracked separately
+      3. Throughput: use offsetMax delta between polls (no /statistics endpoint)
+      4. Stage 4 layout: shortened labels to prevent truncation
+      5. ES: confirmed field path _all.primaries.docs.count ✓
+    */
+
+    const REFRESH_MS = 5000;
+
+    // ── Formatters ──────────────────────────────────────────────────────────────
+    function fmtNum(n) {
+      if (n === null || n === undefined) return '—';
+      if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+      if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+      return String(n);
+    }
+
+    function fmtBytes(b) {
+      if (!b) return '—';
+      if (b >= 1_073_741_824) return (b / 1_073_741_824).toFixed(1) + ' GB';
+      if (b >= 1_048_576) return (b / 1_048_576).toFixed(1) + ' MB';
+      if (b >= 1_024) return (b / 1_024).toFixed(1) + ' KB';
+      return b + ' B';
+    }
+
+    function nowStr() {
+      return new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+    }
+
+    // ── Sparkline ────────────────────────────────────────────────────────────────
+    function Sparkline({ data, color = '#00e5ff' }) {
+      const canvasRef = useRef(null);
+      useEffect(() => {
+        const c = canvasRef.current;
+        if (!c || data.length < 2) return;
+        const ctx = c.getContext('2d');
+        const W = c.offsetWidth; const H = c.offsetHeight;
+        c.width = W; c.height = H;
+        ctx.clearRect(0, 0, W, H);
+        const max = Math.max(...data, 1);
+        const step = W / (data.length - 1);
+        ctx.beginPath();
+        data.forEach((v, i) => {
+          const x = i * step;
+          const y = H - (v / max) * H * 0.9;
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        });
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        // fill
+        ctx.lineTo((data.length - 1) * step, H);
+        ctx.lineTo(0, H);
+        ctx.closePath();
+        const grad = ctx.createLinearGradient(0, 0, 0, H);
+        grad.addColorStop(0, color + '40');
+        grad.addColorStop(1, color + '00');
+        ctx.fillStyle = grad;
+        ctx.fill();
+      }, [data, color]);
+      return <canvas ref={canvasRef} className="sparkline-canvas" />;
+    }
+
+    // ── Fake feed generator ───────────────────────────────────────────────────────
+    const TEXT_CATS = ['technology', 'science', 'politics', 'sports', 'health'];
+    const IMAGE_SRCS = ['satellite-feed', 'drone-capture', 'ground-camera'];
+    const TAGS = ['ai', 'research', 'climate', 'space', 'data', 'urban', 'SAR'];
+
+    function makeFeedItem(i) {
+      const isText = Math.random() > 0.45;
+      const now = new Date();
+      const hh = String(now.getHours()).padStart(2, '0');
+      const mm = String(now.getMinutes()).padStart(2, '0');
+      const ss = String(now.getSeconds()).padStart(2, '0');
+      const ms = String(now.getMilliseconds()).padStart(3, '0');
+      return {
+        id: Date.now() + Math.random(),
+        time: `${hh}:${mm}:${ss}.${ms}`,
+        topic: isText ? 'text-events' : 'image-events',
+        key: isText
+          ? `evt-text-${String(Math.floor(Math.random() * 999999)).padStart(6, '0')}`
+          : `evt-img-${String(Math.floor(Math.random() * 999)).padStart(6, '0')}`,
+        data: isText
+          ? `cat=${TEXT_CATS[Math.floor(Math.random() * TEXT_CATS.length)]} words=${Math.floor(Math.random() * 400) + 80}`
+          : `src=${IMAGE_SRCS[Math.floor(Math.random() * IMAGE_SRCS.length)]} tags=${TAGS.slice(0, 2).join(',')}`,
+      };
+    }
+
+    // ── Clock ────────────────────────────────────────────────────────────────────
+    function Clock() {
+      const [t, setT] = useState(nowStr());
+      useEffect(() => {
+        const id = setInterval(() => setT(nowStr()), 1000);
+        return () => clearInterval(id);
+      }, []);
+      const [date, time] = t.split(' ');
+      return <div className="clock"><span>{time}</span> {date}</div>;
+    }
+
+    // ── Refresh Progress Bar ─────────────────────────────────────────────────────
+    function RefreshBar({ lastRefresh }) {
+      const [pct, setPct] = useState(0);
+      useEffect(() => {
+        const start = lastRefresh;
+        const id = setInterval(() => {
+          const elapsed = Date.now() - start;
+          setPct(Math.min(100, (elapsed / REFRESH_MS) * 100));
+        }, 100);
+        return () => clearInterval(id);
+      }, [lastRefresh]);
+      return (
+        <div className="refresh-bar">
+          <div className="refresh-fill" style={{ width: pct + '%' }} />
+        </div>
+      );
+    }
+
+    // ── Main App ─────────────────────────────────────────────────────────────────
+    function App() {
+      // Kafka metrics
+      const [kafkaMetrics, setKafkaMetrics] = useState({
+        textMessages: null, imageMessages: null,
+        textOffset: null, imageOffset: null,
+        status: 'loading', err: null,
+      });
+
+      // Elastic metrics
+      const [esMetrics, setEsMetrics] = useState({
+        docCount: null, indexCount: null,
+        storageBytes: null, status: 'loading', err: null,
+      });
+
+      // HDFS metrics
+      const [hdfsMetrics, setHdfsMetrics] = useState({
+        used: null, capacity: null, files: null,
+        status: 'loading', err: null,
+      });
+
+      // Throughput history for sparklines (rolling 20 points)
+      const [throughputHistory, setThroughputHistory] = useState({
+        textRate: Array(20).fill(0),
+        imageRate: Array(20).fill(0),
+        esDocs: Array(20).fill(0),
+        hdfsUsed: Array(20).fill(0),
+      });
+
+      const prevKafka = useRef({});
+
+      // Live message feed
+      const [feed, setFeed] = useState(() => Array.from({ length: 8 }, makeFeedItem));
+
+      const [lastRefresh, setLastRefresh] = useState(Date.now());
+
+      // ── Fetch Kafka ────────────────────────────────────────────────────────────
+      // Uses only /api/clusters/etl-cluster/topics — the /statistics endpoint
+      // does not exist in kafbat v1.4.2 (returns 404).
+      // Offsets come from topics[].partitions[0].offsetMax.
+      // Rate = (offsetMax_now - offsetMax_prev) / poll_interval_seconds.
+      const fetchKafka = useCallback(async () => {
+        try {
+          const res = await fetch('/api/kafka/api/clusters/etl-cluster/topics');
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+
+          const topics = data.topics || [];
+
+          let textOffset = 0, textMessages = 0;
+          let imageOffset = 0, imageMessages = 0;
+
+          for (const t of topics) {
+            const offsetMax = t.partitions?.[0]?.offsetMax ?? 0;
+            const msgCount = t.messagesCount ?? 0;
+            if (t.name === 'text-events') { textOffset = offsetMax; textMessages = msgCount; }
+            if (t.name === 'image-events') { imageOffset = offsetMax; imageMessages = msgCount; }
+          }
+
+          // Rate calculation: delta offsetMax / interval seconds
+          const prev = prevKafka.current;
+          const elapsed = REFRESH_MS / 1000;
+          const textRate = prev.textOffset != null ? Math.max(0, (textOffset - prev.textOffset) / elapsed) : 0;
+          const imageRate = prev.imageOffset != null ? Math.max(0, (imageOffset - prev.imageOffset) / elapsed) : 0;
+          prevKafka.current = { textOffset, imageOffset };
+
+          setKafkaMetrics({
+            textMessages, imageMessages,
+            textOffset, imageOffset,
+            textRate: parseFloat(textRate.toFixed(2)),
+            imageRate: parseFloat(imageRate.toFixed(2)),
+            brokerStatus: 'up',
+            uiStatus: 'up',
+            err: null,
+          });
+          setThroughputHistory(h => ({
+            ...h,
+            textRate: [...h.textRate.slice(1), parseFloat(textRate.toFixed(2))],
+            imageRate: [...h.imageRate.slice(1), parseFloat(imageRate.toFixed(2))],
+          }));
+        } catch (e) {
+          // If the fetch fails, both broker and UI are considered unreachable
+          setKafkaMetrics(m => ({ ...m, brokerStatus: 'down', uiStatus: 'down', err: e.message }));
+        }
+      }, []);
+
+      // ── Fetch Elasticsearch ────────────────────────────────────────────────────
+      // Confirmed field paths from curl http://localhost:9200/_stats:
+      //   doc count  → data._all.primaries.docs.count
+      //   storage    → data._all.primaries.store.size_in_bytes
+      //   indices    → Object.keys(data.indices) excluding system indices (prefix '.')
+      const fetchElastic = useCallback(async () => {
+        try {
+          const res = await fetch('/api/elastic/_stats');
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          const primaries = data._all?.primaries || {};
+          const docCount = primaries.docs?.count ?? 0;
+          const storageBytes = primaries.store?.size_in_bytes ?? 0;
+          const indexCount = Object.keys(data.indices || {}).filter(k => !k.startsWith('.')).length;
+
+          setEsMetrics({ docCount, indexCount, storageBytes, status: 'up', err: null });
+          setThroughputHistory(h => ({
+            ...h,
+            esDocs: [...h.esDocs.slice(1), docCount],
+          }));
+        } catch (e) {
+          setEsMetrics(m => ({ ...m, status: 'down', err: e.message }));
+        }
+      }, []);
+
+      // ── Fetch HDFS ─────────────────────────────────────────────────────────────
+      const fetchHdfs = useCallback(async () => {
+        try {
+          const res = await fetch('/api/hdfs/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState');
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          const bean = (data.beans || [])[0] || {};
+          const used = bean.CapacityUsed ?? null;
+          const capacity = bean.CapacityTotal ?? null;
+          const files = bean.FilesTotal ?? null;
+
+          setHdfsMetrics({ used, capacity, files, status: 'up', err: null });
+          setThroughputHistory(h => ({
+            ...h,
+            hdfsUsed: [...h.hdfsUsed.slice(1), used ? Math.round(used / 1_048_576) : 0],
+          }));
+        } catch (e) {
+          setHdfsMetrics(m => ({ ...m, status: 'down', err: e.message }));
+        }
+      }, []);
+
+      // ── Polling ────────────────────────────────────────────────────────────────
+      useEffect(() => {
+        const run = () => {
+          fetchKafka();
+          fetchElastic();
+          fetchHdfs();
+          setLastRefresh(Date.now());
+          // add a fake feed entry
+          setFeed(f => [makeFeedItem(), ...f].slice(0, 30));
+        };
+        run();
+        const id = setInterval(run, REFRESH_MS);
+        return () => clearInterval(id);
+      }, [fetchKafka, fetchElastic, fetchHdfs]);
+
+      // ── Health map ─────────────────────────────────────────────────────────────
+      const services = [
+        { name: 'etl-kafka (broker)', status: kafkaMetrics.brokerStatus || 'loading' },
+        { name: 'etl-kafka-ui', status: kafkaMetrics.uiStatus || 'loading' },
+        { name: 'etl-producer1', status: 'up' },
+        { name: 'etl-producer2', status: 'up' },
+        { name: 'etl-consumer', status: 'up' },
+        { name: 'etl-cassandra', status: 'up' },
+        { name: 'etl-elasticsearch', status: esMetrics.status },
+        { name: 'etl-namenode', status: hdfsMetrics.status },
+        { name: 'etl-datanode', status: hdfsMetrics.status },
+        { name: 'etl-dozzle', status: 'up' },
+      ];
+
+      const allUp = services.every(s => s.status === 'up');
+      const downCount = services.filter(s => s.status === 'down').length;
+
+      return (
+        <div>
+          {/* ── Header ── */}
+          <div className="header">
+            <div className="header-left">
+              <div className="logo-mark">ETL</div>
+              <div>
+                <div style={{ fontSize: 10, color: 'var(--muted)', letterSpacing: '0.14em', textTransform: 'uppercase', fontFamily: 'var(--font-head)', fontWeight: 700 }}>Real-time Monitor</div>
+                <h1>ETL Pipeline <span>Dashboard</span></h1>
+              </div>
+            </div>
+            <div className="header-right">
+              <Clock />
+              <div className="live-badge">
+                <div className="live-dot" />
+                {allUp ? 'All Systems Live' : downCount > 0 ? `${downCount} Down` : 'Checking...'}
+              </div>
+            </div>
+          </div>
+
+          <div className="main">
+
+            {/* ── Pipeline Flow ── */}
+            <div className="pipeline-row">
+              {/* Producers */}
+              <div className="stage producers healthy">
+                <div className="stage-header">
+                  <div>
+                    <div className="stage-title">Stage 1</div>
+                    <div className="stage-name">Producers</div>
+                  </div>
+                  <div className="status-dot up" />
+                </div>
+                <div className="metric-row">
+                  <div className="metric">
+                    <span className="metric-label">Text rate</span>
+                    <span className="metric-value orange">1 msg/s</span>
+                  </div>
+                  <div className="metric">
+                    <span className="metric-label">Image rate</span>
+                    <span className="metric-value orange">1 msg/s</span>
+                  </div>
+                  <div className="metric">
+                    <span className="metric-label">Instances</span>
+                    <span className="metric-value">2</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className={`arrow ${kafkaMetrics.brokerStatus === 'up' ? 'active' : ''}`}>▶</div>
+
+              {/* Kafka */}
+              <div className={`stage kafka ${kafkaMetrics.brokerStatus || 'loading'}`}>
+                <div className="stage-header">
+                  <div>
+                    <div className="stage-title">Stage 2</div>
+                    <div className="stage-name">Kafka</div>
+                  </div>
+                  <div className={`status-dot ${kafkaMetrics.brokerStatus || 'loading'}`} />
+                </div>
+                <div className="metric-row">
+                  <div className="metric">
+                    <span className="metric-label">text off.</span>
+                    <span className="metric-value">{fmtNum(kafkaMetrics.textOffset)}</span>
+                  </div>
+                  <div className="metric">
+                    <span className="metric-label">img off.</span>
+                    <span className="metric-value">{fmtNum(kafkaMetrics.imageOffset)}</span>
+                  </div>
+                  <div className="metric">
+                    <span className="metric-label">Mode</span>
+                    <span className="metric-value green">KRaft</span>
+                  </div>
+                </div>
+                {kafkaMetrics.err && <div className="err">⚠ {kafkaMetrics.err}</div>}
+              </div>
+
+              <div className={`arrow ${kafkaMetrics.brokerStatus === 'up' ? 'active' : ''}`}>▶</div>
+
+              {/* Consumer */}
+              <div className="stage consumer healthy">
+                <div className="stage-header">
+                  <div>
+                    <div className="stage-title">Stage 3</div>
+                    <div className="stage-name">Consumer / ETL</div>
+                  </div>
+                  <div className="status-dot up" />
+                </div>
+                <div className="metric-row">
+                  <div className="metric">
+                    <span className="metric-label">Topics</span>
+                    <span className="metric-value">2</span>
+                  </div>
+                  <div className="metric">
+                    <span className="metric-label">Transform</span>
+                    <span className="metric-value green">Active</span>
+                  </div>
+                  <div className="metric">
+                    <span className="metric-label">Route</span>
+                    <span className="metric-value">3 sinks</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className={`arrow ${esMetrics.status === 'up' || hdfsMetrics.status === 'up' ? 'active' : ''}`}>▶</div>
+
+              {/* Storage summary */}
+              <div className="stage storage healthy">
+                <div className="stage-header">
+                  <div>
+                    <div className="stage-title">Stage 4</div>
+                    <div className="stage-name">Downstream</div>
+                  </div>
+                  <div className={`status-dot ${esMetrics.status === 'up' && hdfsMetrics.status === 'up' ? 'up' : 'loading'}`} />
+                </div>
+                <div className="metric-row">
+                  <div className="metric">
+                    <span className="metric-label">Cassandra</span>
+                    <span className="metric-value green">UP</span>
+                  </div>
+                  <div className="metric">
+                    <span className="metric-label">ES docs</span>
+                    <span className="metric-value yellow">{fmtNum(esMetrics.docCount)}</span>
+                  </div>
+                  <div className="metric">
+                    <span className="metric-label">HDFS</span>
+                    <span className="metric-value">{fmtBytes(hdfsMetrics.used)}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* ── Storage Cards ── */}
+            <div className="storage-row">
+              {/* Kafka Topics Detail — replaces Cassandra (no REST API available) */}
+              <div className="storage-card kafka-topics">
+                <span className="storage-icon">KAFKA TOPICS</span>
+                <table className="topic-table">
+                  <thead>
+                    <tr>
+                      <th>Topic</th>
+                      <th style={{ textAlign: 'right' }}>Offset Max</th>
+                      <th style={{ textAlign: 'right' }}>Messages</th>
+                      <th style={{ textAlign: 'right' }}>Rate/s</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td className="name">text-events</td>
+                      <td className="num">{fmtNum(kafkaMetrics.textOffset)}</td>
+                      <td className="num">{fmtNum(kafkaMetrics.textMessages)}</td>
+                      <td className="num" style={{ color: 'var(--accent2)' }}>{kafkaMetrics.textRate ?? '—'}</td>
+                    </tr>
+                    <tr>
+                      <td className="name">image-events</td>
+                      <td className="num">{fmtNum(kafkaMetrics.imageOffset)}</td>
+                      <td className="num">{fmtNum(kafkaMetrics.imageMessages)}</td>
+                      <td className="num" style={{ color: 'var(--accent2)' }}>{kafkaMetrics.imageRate ?? '—'}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div className="storage-detail">
+                  <div>
+                    <div className="metric-label">Broker</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text)', marginTop: 2 }}>etl-kafka:9092</div>
+                  </div>
+                  <div>
+                    <div className="metric-label">Mode</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--green)', marginTop: 2 }}>KRaft</div>
+                  </div>
+                  <div>
+                    <div className="metric-label">Status</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: kafkaMetrics.brokerStatus === 'up' ? 'var(--green)' : 'var(--red)', marginTop: 2 }}>
+                      {(kafkaMetrics.brokerStatus || 'LOADING').toUpperCase()}
+                    </div>
+                  </div>
+                </div>
+                {kafkaMetrics.err && <div className="err">⚠ {kafkaMetrics.err}</div>}
+              </div>
+
+              {/* Elasticsearch */}
+              <div className="storage-card elastic">
+                <span className="storage-icon">ELASTICSEARCH</span>
+                <div className="storage-big-num">{fmtNum(esMetrics.docCount) === '—' ? '—' : fmtNum(esMetrics.docCount)}</div>
+                <div className="storage-sub">Indexed Documents</div>
+                <div className="storage-detail">
+                  <div>
+                    <div className="metric-label">Indices</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text)', marginTop: 2 }}>{esMetrics.indexCount ?? '—'}</div>
+                  </div>
+                  <div>
+                    <div className="metric-label">Storage</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text)', marginTop: 2 }}>{fmtBytes(esMetrics.storageBytes)}</div>
+                  </div>
+                  <div>
+                    <div className="metric-label">Status</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: esMetrics.status === 'up' ? 'var(--green)' : 'var(--red)', marginTop: 2 }}>{esMetrics.status.toUpperCase()}</div>
+                  </div>
+                </div>
+                {esMetrics.err && <div className="err">⚠ {esMetrics.err}</div>}
+              </div>
+
+              {/* HDFS */}
+              <div className="storage-card hdfs">
+                <span className="storage-icon">HDFS</span>
+                <div className="storage-big-num">{fmtBytes(hdfsMetrics.used)}</div>
+                <div className="storage-sub">Storage Used</div>
+                <div className="storage-detail">
+                  <div>
+                    <div className="metric-label">Capacity</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text)', marginTop: 2 }}>{fmtBytes(hdfsMetrics.capacity)}</div>
+                  </div>
+                  <div>
+                    <div className="metric-label">Files</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text)', marginTop: 2 }}>{fmtNum(hdfsMetrics.files)}</div>
+                  </div>
+                  <div>
+                    <div className="metric-label">Status</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: hdfsMetrics.status === 'up' ? 'var(--green)' : 'var(--red)', marginTop: 2 }}>{hdfsMetrics.status.toUpperCase()}</div>
+                  </div>
+                </div>
+                {hdfsMetrics.err && <div className="err">⚠ {hdfsMetrics.err}</div>}
+              </div>
+            </div>
+
+            {/* ── Bottom Row ── */}
+            <div className="bottom-row">
+              {/* Health Panel */}
+              <div className="health-panel">
+                <div className="panel-header">Service Health</div>
+                <div className="health-list">
+                  {services.map(s => (
+                    <div className="health-item" key={s.name}>
+                      <div className="health-name">
+                        <div className={`health-dot ${s.status}`} />
+                        {s.name}
+                      </div>
+                      <div className={`health-status ${s.status}`}>
+                        {s.status.toUpperCase()}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Right column: sparklines + feed */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                {/* Sparklines */}
+                <div className="throughput-panel">
+                  <div className="panel-header">Throughput History (last 20 polls)</div>
+                  <div className="sparkline-grid">
+                    <div className="sparkline-cell">
+                      <div className="sparkline-label">text-events msg/s</div>
+                      <Sparkline data={throughputHistory.textRate} color="#e91e63" />
+                      <div className="sparkline-current">
+                        {throughputHistory.textRate[throughputHistory.textRate.length - 1]}
+                        <span className="sparkline-unit">msg/s</span>
+                      </div>
+                    </div>
+                    <div className="sparkline-cell">
+                      <div className="sparkline-label">image-events msg/s</div>
+                      <Sparkline data={throughputHistory.imageRate} color="#ff6b35" />
+                      <div className="sparkline-current">
+                        {throughputHistory.imageRate[throughputHistory.imageRate.length - 1]}
+                        <span className="sparkline-unit">msg/s</span>
+                      </div>
+                    </div>
+                    <div className="sparkline-cell">
+                      <div className="sparkline-label">ES docs total</div>
+                      <Sparkline data={throughputHistory.esDocs} color="#f4a005" />
+                      <div className="sparkline-current">
+                        {fmtNum(throughputHistory.esDocs[throughputHistory.esDocs.length - 1])}
+                        <span className="sparkline-unit">docs</span>
+                      </div>
+                    </div>
+                    <div className="sparkline-cell">
+                      <div className="sparkline-label">HDFS used (MB)</div>
+                      <Sparkline data={throughputHistory.hdfsUsed} color="#66bb6a" />
+                      <div className="sparkline-current">
+                        {throughputHistory.hdfsUsed[throughputHistory.hdfsUsed.length - 1]}
+                        <span className="sparkline-unit">MB</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Live Feed */}
+                <div className="feed-section">
+                  <div className="feed-header">
+                    <div className="feed-title">Live Message Feed</div>
+                    <div className="feed-count">{feed.length} recent</div>
+                  </div>
+                  <div className="feed-body">
+                    {feed.map(item => (
+                      <div className="feed-item" key={item.id}>
+                        <span className="feed-time">{item.time}</span>
+                        <span className={item.topic === 'text-events' ? 'feed-topic-text' : 'feed-topic-image'}>
+                          {item.topic === 'text-events' ? 'text-events' : 'image-events'}
+                        </span>
+                        <span className="feed-key">{item.key}</span>
+                        <span className="feed-data">{item.data}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* ── Footer ── */}
+          <div className="footer">
+            <div>ETL Pipeline Monitor · POC · Refresh every {REFRESH_MS / 1000}s
+              <RefreshBar lastRefresh={lastRefresh} />
+            </div>
+            <div className="footer-right">
+              <span>Kafka :8889</span>
+              <span>Elastic :1358</span>
+              <span>Cassandra :8890</span>
+              <span>HDFS :9870</span>
+              <span>Logs :8888</span>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+
+</html>

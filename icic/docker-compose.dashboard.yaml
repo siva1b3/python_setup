@@ -1,0 +1,19 @@
+name: etl-pipeline-dashboard
+
+networks:
+  etl-network:
+    name: etl-network
+    external: true
+
+services:
+  etl-dashboard:
+    image: nginx:alpine
+    container_name: etl-dashboard
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "3000:80"
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
