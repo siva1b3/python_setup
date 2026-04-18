@@ -11,7 +11,7 @@ volumes:
 
 services:
 
-    # ─── Consumer — Kafka → Cassandra + HDFS ────────────────────────────────────
+    # ─── Consumer — Kafka → Cassandra + HDFS + Elasticsearch ────────────────────
     etl-consumer:
         image: python:3.14-slim-bookworm
         container_name: etl-consumer
@@ -31,13 +31,15 @@ services:
             CASSANDRA_DC: dc1
             HDFS_URL: http://etl-namenode:9870
             HDFS_IMAGES_PATH: /etl/images
+            ES_URL: http://etl-elasticsearch:9200
+            ES_INDEX: text-events
             STATS_INTERVAL: "30"
             PYTHONUNBUFFERED: "1"
         command:
             - bash
             - -c
             - |
-              pip install confluent-kafka cassandra-driver hdfs --quiet
+              pip install confluent-kafka cassandra-driver hdfs elasticsearch --quiet
               python - <<'EOF'
               import os, json, signal, sys, time
               from pathlib import Path
@@ -47,6 +49,7 @@ services:
               from cassandra.policies import DCAwareRoundRobinPolicy
               from cassandra.query import ConsistencyLevel
               from hdfs import InsecureClient
+              from elasticsearch import Elasticsearch
 
               # ─── Config ─────────────────────────────────────────────────────────
               BROKER         = os.environ["KAFKA_BROKER"]
@@ -59,6 +62,8 @@ services:
               LOCAL_DC       = os.environ["CASSANDRA_DC"]
               HDFS_URL       = os.environ["HDFS_URL"]
               HDFS_IMG_PATH  = os.environ["HDFS_IMAGES_PATH"]
+              ES_URL         = os.environ["ES_URL"]
+              ES_INDEX       = os.environ["ES_INDEX"]
               STATS_INTERVAL = int(os.environ.get("STATS_INTERVAL", "30"))
 
               # ─── Logger ─────────────────────────────────────────────────────────
@@ -78,6 +83,8 @@ services:
               log("INFO", "BOOT", f"cassandra_dc     = {LOCAL_DC}")
               log("INFO", "BOOT", f"hdfs_url         = {HDFS_URL}")
               log("INFO", "BOOT", f"hdfs_images_path = {HDFS_IMG_PATH}")
+              log("INFO", "BOOT", f"es_url           = {ES_URL}")
+              log("INFO", "BOOT", f"es_index         = {ES_INDEX}")
               log("INFO", "BOOT", f"stats_interval   = {STATS_INTERVAL}s")
               log("INFO", "BOOT", "=" * 70)
 
@@ -96,23 +103,18 @@ services:
                           )
                           session = cluster.connect(KEYSPACE)
                           session.default_consistency_level = ConsistencyLevel.LOCAL_ONE
-
                           row = session.execute("SELECT now() FROM system.local").one()
                           log("INFO", "CASS", f"round-trip OK, server time = {row[0]}")
-
                           for tbl in ("text_events", "image_events"):
                               session.execute(f"SELECT * FROM {tbl} LIMIT 1")
                               log("INFO", "CASS", f"table verified: {KEYSPACE}.{tbl}")
-
                           log("INFO", "CASS", "READY")
                           return cluster, session
-
                       except Exception as e:
                           log("ERROR", "CASS", f"attempt {attempt} failed: {type(e).__name__}: {e}")
                           if attempt < retries:
                               log("INFO", "CASS", f"sleeping {delay}s before retry")
                               time.sleep(delay)
-
                   log("FATAL", "CASS", "exhausted all retries — exiting")
                   sys.exit(1)
 
@@ -127,22 +129,18 @@ services:
                           brokers = list(meta.brokers.values())
                           topics  = list(meta.topics.keys())
                           log("INFO", "KAFKA", f"broker metadata OK — brokers={len(brokers)} topics={topics}")
-
                           for required in (TEXT_TOPIC, IMAGE_TOPIC):
                               if required not in meta.topics:
                                   raise RuntimeError(f"required topic missing: {required}")
                               log("INFO", "KAFKA", f"topic verified: {required}")
-
                           del probe
                           log("INFO", "KAFKA", "READY")
                           return
-
                       except Exception as e:
                           log("ERROR", "KAFKA", f"attempt {attempt} failed: {type(e).__name__}: {e}")
                           if attempt < retries:
                               log("INFO", "KAFKA", f"sleeping {delay}s before retry")
                               time.sleep(delay)
-
                   log("FATAL", "KAFKA", "exhausted all retries — exiting")
                   sys.exit(1)
 
@@ -153,35 +151,67 @@ services:
                       try:
                           log("INFO", "HDFS", f"attempt {attempt}/{retries}")
                           client = InsecureClient(HDFS_URL, user="root")
-
-                          # Full round-trip: list root — fails if NameNode is in safe mode
                           entries = client.list("/")
                           log("INFO", "HDFS", f"root listing OK — entries={entries}")
-
-                          # Ensure target path exists
                           client.makedirs(HDFS_IMG_PATH)
                           log("INFO", "HDFS", f"target path confirmed: {HDFS_IMG_PATH}")
-
-                          # Write + delete probe file to verify DataNode write path
                           probe_path = f"{HDFS_IMG_PATH}/.probe"
                           with client.write(probe_path, overwrite=True) as f:
                               f.write(b"probe")
                           client.delete(probe_path)
                           log("INFO", "HDFS", "write probe OK — DataNode is writable")
-
                           log("INFO", "HDFS", "READY")
                           return client
-
                       except Exception as e:
                           log("ERROR", "HDFS", f"attempt {attempt} failed: {type(e).__name__}: {e}")
                           if attempt < retries:
                               log("INFO", "HDFS", f"sleeping {delay}s before retry")
                               time.sleep(delay)
-
                   log("FATAL", "HDFS", "exhausted all retries — exiting")
                   sys.exit(1)
 
-              # ─── Establish all connections before poll loop ──────────────────────
+              # ─── Connect: Elasticsearch ──────────────────────────────────────────
+              def connect_elasticsearch(retries=15, delay=10):
+                  log("INFO", "ES", f"connecting to {ES_URL}")
+                  for attempt in range(1, retries + 1):
+                      try:
+                          log("INFO", "ES", f"attempt {attempt}/{retries}")
+                          client = Elasticsearch(ES_URL)
+                          info = client.info()
+                          log("INFO", "ES", f"connected — cluster={info['cluster_name']} version={info['version']['number']}")
+                          health = client.cluster.health()
+                          log("INFO", "ES", f"cluster health = {health['status']}")
+                          if not client.indices.exists(index=ES_INDEX):
+                              client.indices.create(index=ES_INDEX, body={
+                                  "mappings": {
+                                      "properties": {
+                                          "event_id":   {"type": "keyword"},
+                                          "event_time": {"type": "date"},
+                                          "source":     {"type": "keyword"},
+                                          "language":   {"type": "keyword"},
+                                          "category":   {"type": "keyword"},
+                                          "title":      {"type": "text"},
+                                          "content":    {"type": "text"},
+                                          "word_count": {"type": "integer"},
+                                          "tags":       {"type": "keyword"},
+                                          "ingested_at":{"type": "date"},
+                                      }
+                                  }
+                              })
+                              log("INFO", "ES", f"index created: {ES_INDEX}")
+                          else:
+                              log("INFO", "ES", f"index already exists: {ES_INDEX}")
+                          log("INFO", "ES", "READY")
+                          return client
+                      except Exception as e:
+                          log("ERROR", "ES", f"attempt {attempt} failed: {type(e).__name__}: {e}")
+                          if attempt < retries:
+                              log("INFO", "ES", f"sleeping {delay}s before retry")
+                              time.sleep(delay)
+                  log("FATAL", "ES", "exhausted all retries — exiting")
+                  sys.exit(1)
+
+              # ─── Establish all connections ───────────────────────────────────────
               log("INFO", "BOOT", "--- phase 1: Cassandra ---")
               cluster, session = connect_cassandra()
 
@@ -190,6 +220,9 @@ services:
 
               log("INFO", "BOOT", "--- phase 3: HDFS ---")
               hdfs_client = connect_hdfs()
+
+              log("INFO", "BOOT", "--- phase 4: Elasticsearch ---")
+              es_client = connect_elasticsearch()
 
               log("INFO", "BOOT", "all connections established — proceeding to consume")
               log("INFO", "BOOT", "=" * 70)
@@ -265,6 +298,24 @@ services:
                       datetime.now(timezone.utc),
                   ))
 
+              def index_text(event):
+                  es_client.index(
+                      index=ES_INDEX,
+                      id=event["event_id"],
+                      document={
+                          "event_id":   event["event_id"],
+                          "event_time": event["timestamp"],
+                          "source":     event.get("source"),
+                          "language":   event.get("language"),
+                          "category":   event.get("category"),
+                          "title":      event.get("title"),
+                          "content":    event.get("content"),
+                          "word_count": event.get("word_count"),
+                          "tags":       event.get("tags", []),
+                          "ingested_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      }
+                  )
+
               def upload_to_hdfs(event):
                   src = Path(event.get("file_path", ""))
                   if not src.exists():
@@ -294,7 +345,7 @@ services:
               # ─── Main loop ──────────────────────────────────────────────────────
               log("INFO", "MAIN", "entering poll loop")
 
-              stats = {"text": 0, "image": 0, "hdfs_ok": 0, "hdfs_skip": 0, "parse_err": 0, "write_err": 0}
+              stats = {"text": 0, "image": 0, "hdfs_ok": 0, "hdfs_skip": 0, "es_ok": 0, "parse_err": 0, "write_err": 0}
               last_report = time.time()
               first_message_seen = False
 
@@ -308,6 +359,7 @@ services:
                               f"image={stats['image']} "
                               f"hdfs_ok={stats['hdfs_ok']} "
                               f"hdfs_skip={stats['hdfs_skip']} "
+                              f"es_ok={stats['es_ok']} "
                               f"parse_err={stats['parse_err']} "
                               f"write_err={stats['write_err']} "
                               f"total={stats['text']+stats['image']}")
@@ -347,8 +399,10 @@ services:
                           if topic == TEXT_TOPIC:
                               t0 = time.monotonic()
                               write_text(event)
+                              index_text(event)
                               dt_ms = (time.monotonic() - t0) * 1000
                               stats["text"] += 1
+                              stats["es_ok"] += 1
                               log("INFO", "TEXT->CS",
                                   f"id={event['event_id']} "
                                   f"category={event.get('category', '?')} "
@@ -367,7 +421,6 @@ services:
                                       f"dest={hdfs_dest}")
                               else:
                                   stats["hdfs_skip"] += 1
-
                               write_image(event)
                               dt_ms = (time.monotonic() - t0) * 1000
                               stats["image"] += 1
@@ -397,6 +450,7 @@ services:
                   log("INFO", "SHUTDN",
                       f"final stats — text={stats['text']} image={stats['image']} "
                       f"hdfs_ok={stats['hdfs_ok']} hdfs_skip={stats['hdfs_skip']} "
+                      f"es_ok={stats['es_ok']} "
                       f"parse_err={stats['parse_err']} write_err={stats['write_err']}")
                   log("INFO", "SHUTDN", "closing Kafka consumer")
                   consumer.close()
