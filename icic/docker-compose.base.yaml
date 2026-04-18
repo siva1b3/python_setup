@@ -1,0 +1,637 @@
+name: etl-pipeline
+
+networks:
+  etl-network:
+    name: etl-network
+    driver: bridge
+
+volumes:
+  kafka-data:
+    name: kafka-data
+  kafka-secrets:
+    name: kafka-secrets
+  cassandra-data:
+    name: cassandra-data
+  images-data:
+    name: images-data
+
+services:
+
+  etl-kafka:
+    image: confluentinc/cp-kafka:8.1.2
+    container_name: etl-kafka
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+      - kafka-secrets:/etc/kafka/secrets
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://etl-kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@etl-kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_NUM_IO_THREADS: 8
+      KAFKA_NUM_NETWORK_THREADS: 3
+      KAFKA_SOCKET_SEND_BUFFER_BYTES: 102400
+      KAFKA_SOCKET_RECEIVE_BUFFER_BYTES: 102400
+    healthcheck:
+      test: [ "CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092" ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  etl-kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.4.2
+    container_name: etl-kafka-ui
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "8889:8080"
+    depends_on:
+      etl-kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: etl-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: etl-kafka:9092
+
+  etl-cassandra:
+    image: cassandra:5.0.7-bookworm
+    container_name: etl-cassandra
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "9042:9042"
+      - "7000:7000"
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    environment:
+      CASSANDRA_CLUSTER_NAME: etl-cluster
+      CASSANDRA_DC: dc1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      CASSANDRA_NUM_TOKENS: 16
+      CASSANDRA_LISTEN_ADDRESS: auto
+      CASSANDRA_BROADCAST_ADDRESS: etl-cassandra
+      CASSANDRA_RPC_ADDRESS: 0.0.0.0
+      CASSANDRA_BROADCAST_RPC_ADDRESS: etl-cassandra
+      MAX_HEAP_SIZE: 1G
+      HEAP_NEWSIZE: 200M
+      CASSANDRA_COMPACTION_THROUGHPUT_MB_PER_SEC: 16
+      CASSANDRA_CONCURRENT_READS: 32
+      CASSANDRA_CONCURRENT_WRITES: 32
+      CASSANDRA_MEMTABLE_ALLOCATION_TYPE: heap_buffers
+    healthcheck:
+      test: [ "CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1" ]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  etl-cassandra-ui:
+    image: ipushc/cassandra-web:v1.1.5
+    container_name: etl-cassandra-ui
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "8890:8083"
+    depends_on:
+      etl-cassandra:
+        condition: service_healthy
+    environment:
+      HOST_PORT: ":8083"
+      CASSANDRA_HOST: etl-cassandra
+      CASSANDRA_PORT: "9042"
+
+  etl-dozzle:
+    image: amir20/dozzle:v10
+    container_name: etl-dozzle
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "8888:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      DOZZLE_FILTER: "name=etl-"
+
+  etl-image-gen:
+    image: python:3.14-slim-bookworm
+    container_name: etl-image-gen
+    networks:
+      - etl-network
+    volumes:
+      - images-data:/data/images
+    restart: "no"
+    command:
+      - bash
+      - -c
+      - |
+        pip install pillow numpy --quiet
+        python - <<'PYEOF'
+        import os, random, sys
+        import numpy as np
+        from PIL import Image
+
+        _R0 = '/data/images'
+        _R1 = int(os.environ.get('IMG_POOL_SIZE', '1000'))
+        _R2 = ['RGB', 'L']
+        _R3 = (200, 1000)
+
+        os.makedirs(_R0, exist_ok=True)
+
+        def _gx(n):
+            return random.randint(_R3[0], _R3[1])
+
+        def _gy(n):
+            return random.randint(_R3[0], _R3[1])
+
+        def _gm():
+            return random.choice(_R2)
+
+        def _mk(i, w, h, m):
+            if m == 'RGB':
+                return np.random.randint(0, 255, (h, w, 3), dtype=np.uint8)
+            return np.random.randint(0, 255, (h, w), dtype=np.uint8)
+
+        def _wt(i, arr, m):
+            _p = f'{_R0}/img-{i:03d}.png'
+            Image.fromarray(arr, m).save(_p)
+            return _p
+
+        _c0 = 0
+        _c1 = 0
+        for _i in range(_R1):
+            _w = _gx(_i)
+            _h = _gy(_i)
+            _m = _gm()
+            _a = _mk(_i, _w, _h, _m)
+            _p = _wt(_i, _a, _m)
+            _c0 += 1
+            _c1 += os.path.getsize(_p)
+            if _i % 100 == 0:
+                print(f'[POOL] {_c0}/{_R1} written  bytes_total={_c1}', flush=True)
+
+        print(f'[POOL] complete  total={_c0}  bytes={_c1}', flush=True)
+        PYEOF
+
+  etl-producer1:
+    image: python:3.14-slim-bookworm
+    container_name: etl-producer1
+    networks:
+      - etl-network
+    restart: unless-stopped
+    environment:
+      _S0: etl-kafka:9092
+      _S1: text-events
+      _S2: "1"
+      _S3: "0"
+      _S4: etl-producer1
+      _S5: "5242880"
+      _S6: "0"
+      PYTHONUNBUFFERED: "1"
+    command:
+      - bash
+      - -c
+      - |
+        pip install confluent-kafka --quiet
+        python - <<'PYEOF'
+        import os, json, time, random, signal, sys
+        from confluent_kafka import Producer
+
+        _b  = os.environ['_S0']
+        _t  = os.environ['_S1']
+        _r  = float(os.environ.get('_S2', '1'))
+        _n  = int(os.environ.get('_S3', '0'))
+        _id = os.environ.get('_S4', 'p1')
+        _iv = 1.0 / _r
+
+        _p = Producer({
+            'bootstrap.servers': _b,
+            'linger.ms': 0,
+            'enable.idempotence': True,
+            'client.id': _id,
+            'compression.type': 'none',
+            'acks': 'all',
+        })
+
+        _SRC = ['news-scraper', 'rss-feed', 'web-crawler']
+        _CAT = ['technology', 'science', 'politics', 'sports', 'health']
+        _TGS = ['ai', 'research', 'climate', 'election', 'space', 'health', 'data']
+        _TTL = [
+            'New AI model released by research lab',
+            'Scientists discover new exoplanet',
+            'Election results finalized in three states',
+            'Team wins championship after decade',
+            'Study links diet to cognitive performance',
+            'Spacecraft completes Mars orbit insertion',
+            'Open source framework reaches version 2.0',
+            'Global temperatures hit record high',
+            'New battery technology doubles EV range',
+            'Researchers map complete neural connectome',
+        ]
+
+        _dc = [0, 0, 0]
+
+        def _cb(e, m):
+            if e:
+                _dc[1] += 1
+            else:
+                _dc[0] += 1
+
+        def _ev(i):
+            _w = random.randint(80, 400)
+            return {
+                'event_id':  f'evt-text-{i:06d}',
+                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                'source':    random.choice(_SRC),
+                'language':  'en',
+                'category':  random.choice(_CAT),
+                'title':     random.choice(_TTL),
+                'content':   f'Sample content for event {i:06d}. ' * (_w // 10),
+                'word_count': _w,
+                'tags':      random.sample(_TGS, k=random.randint(2, 4)),
+            }
+
+        def _sig(s, f):
+            print('[STOP] flushing...', flush=True)
+            _p.flush()
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, _sig)
+        signal.signal(signal.SIGINT,  _sig)
+
+        print(f'[INIT] broker={_b} topic={_t} rate={_r}', flush=True)
+        _i = 0
+        _nd = time.monotonic()
+        while _n == 0 or _i < _n:
+            _e  = _ev(_i)
+            _pl = json.dumps(_e)
+            _p.produce(_t, key=_e['event_id'], value=_pl, callback=_cb)
+            _dc[2] += 1
+            _p.poll(0)
+            print(f'[SEND] {_e["event_id"]}  cat={_e["category"]}  sz={len(_pl)}B', flush=True)
+            _i += 1
+            _nd += _iv
+            _sl = _nd - time.monotonic()
+            if _sl > 0:
+                time.sleep(_sl)
+            else:
+                _nd = time.monotonic()
+        _p.flush()
+        PYEOF
+
+  etl-producer2:
+    image: python:3.14-slim-bookworm
+    container_name: etl-producer2
+    networks:
+      - etl-network
+    volumes:
+      - images-data:/data/images
+    restart: unless-stopped
+    environment:
+      _S0: etl-kafka:9092
+      _S1: image-events
+      _S2: /data/images
+      _S3: "1"
+      _S4: "0"
+      _S5: etl-producer2
+      _S6: "png"
+      PYTHONUNBUFFERED: "1"
+    command:
+      - bash
+      - -c
+      - |
+        pip install confluent-kafka --quiet
+        python - <<'PYEOF'
+        import os, json, time, random, signal, sys
+        from pathlib import Path
+        from confluent_kafka import Producer
+
+        _b   = os.environ['_S0']
+        _t   = os.environ['_S1']
+        _dir = Path(os.environ['_S2'])
+        _r   = float(os.environ.get('_S3', '1'))
+        _n   = int(os.environ.get('_S4', '0'))
+        _id  = os.environ.get('_S5', 'p2')
+        _ext = os.environ.get('_S6', 'png')
+        _iv  = 1.0 / _r
+
+        _p = Producer({
+            'bootstrap.servers': _b,
+            'linger.ms': 0,
+            'enable.idempotence': True,
+            'client.id': _id,
+            'acks': 'all',
+        })
+
+        _SRC = ['satellite-feed', 'drone-capture', 'ground-camera']
+        _TGS = ['remote-sensing', 'urban', 'rural', 'daytime', 'nighttime', 'sar', 'optical']
+
+        _imgs = sorted(_dir.glob(f'*.{_ext}'))
+        if not _imgs:
+            print(f'[ERR] no .{_ext} files in {_dir}', flush=True)
+            sys.exit(1)
+
+        _dc = [0, 0, 0]
+        _ic = len(_imgs)
+
+        def _cb(e, m):
+            if e:
+                _dc[1] += 1
+            else:
+                _dc[0] += 1
+
+        def _ev(i, img):
+            _st = img.stat()
+            return {
+                'event_id':   f'evt-img-{i:06d}',
+                'timestamp':  time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                'source':     random.choice(_SRC),
+                'image_id':   img.stem,
+                'file_path':  str(img),
+                'format':     img.suffix.lstrip('.').upper(),
+                'size_bytes': _st.st_size,
+                'location': {
+                    'lat': round(random.uniform(8.0,  37.0), 4),
+                    'lon': round(random.uniform(68.0, 97.0), 4),
+                },
+                'tags': random.sample(_TGS, k=3),
+            }
+
+        def _sig(s, f):
+            print('[STOP] flushing...', flush=True)
+            _p.flush()
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, _sig)
+        signal.signal(signal.SIGINT,  _sig)
+
+        _total = _n if _n > 0 else _ic
+        print(f'[INIT] broker={_b} topic={_t} imgs={_ic} rate={_r}', flush=True)
+        _i  = 0
+        _nd = time.monotonic()
+        while _i < _total:
+            _img = _imgs[_i % _ic]
+            _e   = _ev(_i, _img)
+            _pl  = json.dumps(_e)
+            _p.produce(_t, key=_e['event_id'], value=_pl, callback=_cb)
+            _dc[2] += 1
+            _p.poll(0)
+            print(f'[SEND] {_e["event_id"]}  file={_img.name}  sz={_e["size_bytes"]}B', flush=True)
+            _i += 1
+            _nd += _iv
+            _sl = _nd - time.monotonic()
+            if _sl > 0:
+                time.sleep(_sl)
+            else:
+                _nd = time.monotonic()
+        _p.flush()
+        PYEOF
+
+  etl-consumer:
+    image: python:3.14-slim-bookworm
+    container_name: etl-consumer
+    networks:
+      - etl-network
+    restart: unless-stopped
+    environment:
+      _C0: etl-kafka:9092
+      _C1: text-events
+      _C2: image-events
+      _C3: etl-consumer-group
+      _C4: etl-cassandra
+      _C5: "9042"
+      _C6: etl
+      _C7: dc1
+      _C8: "30"
+      _C9: "15"
+      _CA: "10"
+      PYTHONUNBUFFERED: "1"
+    command:
+      - bash
+      - -c
+      - |
+        pip install confluent-kafka cassandra-driver --quiet
+        python - <<'PYEOF'
+        import os, json, signal, sys, time
+        from datetime import datetime, timezone
+        from confluent_kafka import Consumer, KafkaError
+        from cassandra.cluster import Cluster
+        from cassandra.policies import DCAwareRoundRobinPolicy
+        from cassandra.query import ConsistencyLevel
+
+        _b  = os.environ['_C0']
+        _t0 = os.environ['_C1']
+        _t1 = os.environ['_C2']
+        _cg = os.environ['_C3']
+        _ch = os.environ['_C4']
+        _cp = int(os.environ['_C5'])
+        _ks = os.environ['_C6']
+        _dc = os.environ['_C7']
+        _si = int(os.environ.get('_C8', '30'))
+        _rt = int(os.environ.get('_C9', '15'))
+        _rd = int(os.environ.get('_CA', '10'))
+
+        def _log(lv, tg, msg):
+            _ts = datetime.now(timezone.utc).strftime('%H:%M:%S.%f')[:-3]
+            print(f'[{_ts}] [{lv:5s}] [{tg:9s}] {msg}', flush=True)
+
+        _log('INFO', 'BOOT', f'node={_ch}:{_cp} ks={_ks} broker={_b}')
+
+        def _cc(retries, delay):
+            for _a in range(1, retries + 1):
+                try:
+                    _log('INFO', 'CONN', f'attempt {_a}/{retries}')
+                    _cl = Cluster(
+                        [_ch],
+                        port=_cp,
+                        load_balancing_policy=DCAwareRoundRobinPolicy(local_dc=_dc),
+                        protocol_version=5,
+                        connect_timeout=10,
+                    )
+                    _ss = _cl.connect(_ks)
+                    _ss.default_consistency_level = ConsistencyLevel.LOCAL_ONE
+                    _r0 = _ss.execute('SELECT now() FROM system.local').one()
+                    _log('INFO', 'CONN', f'ok  server_time={_r0[0]}')
+                    for _tb in ('text_events', 'image_events'):
+                        _ss.execute(f'SELECT * FROM {_tb} LIMIT 1')
+                        _log('INFO', 'CONN', f'verified {_ks}.{_tb}')
+                    return _cl, _ss
+                except Exception as _e:
+                    _log('ERROR', 'CONN', f'attempt {_a} failed: {type(_e).__name__}: {_e}')
+                    if _a < retries:
+                        time.sleep(delay)
+            raise RuntimeError('unreachable after retries')
+
+        _cl, _ss = _cc(_rt, _rd)
+
+        _q0 = _ss.prepare("""
+            INSERT INTO text_events
+              (event_id, event_time, source, language, category,
+               title, content, word_count, tags, ingested_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """)
+        _q1 = _ss.prepare("""
+            INSERT INTO image_events
+              (event_id, event_time, source, image_id, file_path,
+               format, size_bytes, lat, lon, tags, ingested_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """)
+        _log('INFO', 'PREP', 'statements ready')
+
+        _kc = Consumer({
+            'bootstrap.servers':    _b,
+            'group.id':             _cg,
+            'auto.offset.reset':    'earliest',
+            'enable.auto.commit':   False,
+            'session.timeout.ms':   45000,
+            'max.poll.interval.ms': 300000,
+            'client.id':            'etl-consumer',
+        })
+
+        def _oa(c, ps):
+            _log('INFO', 'REBAL', f'assigned {len(ps)} partitions')
+
+        def _or(c, ps):
+            _log('WARN', 'REBAL', f'revoked {len(ps)} partitions')
+
+        _kc.subscribe([_t0, _t1], on_assign=_oa, on_revoke=_or)
+
+        _run = True
+        def _sig(s, f):
+            global _run
+            _run = False
+
+        signal.signal(signal.SIGTERM, _sig)
+        signal.signal(signal.SIGINT,  _sig)
+
+        def _pts(s):
+            return datetime.strptime(s, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+
+        def _wa(ev):
+            _ss.execute(_q0, (
+                ev['event_id'],
+                _pts(ev['timestamp']),
+                ev.get('source'),
+                ev.get('language'),
+                ev.get('category'),
+                ev.get('title'),
+                ev.get('content'),
+                ev.get('word_count'),
+                set(ev.get('tags', [])) or None,
+                datetime.now(timezone.utc),
+            ))
+
+        def _wb(ev):
+            _lc = ev.get('location', {}) or {}
+            _ss.execute(_q1, (
+                ev['event_id'],
+                _pts(ev['timestamp']),
+                ev.get('source'),
+                ev.get('image_id'),
+                ev.get('file_path'),
+                ev.get('format'),
+                ev.get('size_bytes'),
+                _lc.get('lat'),
+                _lc.get('lon'),
+                set(ev.get('tags', [])) or None,
+                datetime.now(timezone.utc),
+            ))
+
+        _st = {'a': 0, 'b': 0, 'e0': 0, 'e1': 0}
+        _lr = time.time()
+        _f0 = False
+
+        _log('INFO', 'MAIN', 'entering poll loop')
+
+        try:
+            while _run:
+                _m = _kc.poll(timeout=1.0)
+
+                if time.time() - _lr > _si:
+                    _log('INFO', 'STAT',
+                        f'a={_st["a"]} b={_st["b"]} '
+                        f'e0={_st["e0"]} e1={_st["e1"]} '
+                        f'total={_st["a"]+_st["b"]}')
+                    _lr = time.time()
+
+                if _m is None:
+                    continue
+
+                if _m.error():
+                    if _m.error().code() != KafkaError._PARTITION_EOF:
+                        _log('ERROR', 'POLL', str(_m.error()))
+                    continue
+
+                if not _f0:
+                    _log('INFO', 'MAIN', 'pipeline flowing')
+                    _f0 = True
+
+                _tp = _m.topic()
+                _pt = _m.partition()
+                _of = _m.offset()
+                _ky = _m.key().decode() if _m.key() else None
+                _sz = len(_m.value()) if _m.value() else 0
+
+                _log('INFO', 'RECV', f'tp={_tp} pt={_pt} of={_of} key={_ky} sz={_sz}B')
+
+                try:
+                    _ev = json.loads(_m.value().decode('utf-8'))
+                except json.JSONDecodeError as _e:
+                    _log('ERROR', 'PARSE', f'bad json of={_of}: {_e}')
+                    _kc.commit(message=_m, asynchronous=False)
+                    _st['e0'] += 1
+                    continue
+
+                try:
+                    _t0_ = time.monotonic()
+                    if _tp == _t0:
+                        _wa(_ev)
+                        _st['a'] += 1
+                        _log('INFO', 'W->A',
+                            f'id={_ev["event_id"]} '
+                            f'dt={(time.monotonic()-_t0_)*1000:.1f}ms '
+                            f'total={_st["a"]}')
+                    elif _tp == _t1:
+                        _wb(_ev)
+                        _st['b'] += 1
+                        _log('INFO', 'W->B',
+                            f'id={_ev["event_id"]} '
+                            f'dt={(time.monotonic()-_t0_)*1000:.1f}ms '
+                            f'total={_st["b"]}')
+                    else:
+                        _log('WARN', 'SKIP', f'unknown topic {_tp}')
+
+                    _kc.commit(message=_m, asynchronous=False)
+                    _log('INFO', 'COMMIT', f'tp={_tp} pt={_pt} of={_of}')
+
+                except Exception as _e:
+                    _st['e1'] += 1
+                    _log('ERROR', 'WRITE',
+                        f'id={_ev.get("event_id")} err={type(_e).__name__}: {_e}')
+                    time.sleep(1)
+
+        finally:
+            _log('INFO', 'EXIT', f'a={_st["a"]} b={_st["b"]} e0={_st["e0"]} e1={_st["e1"]}')
+            _kc.close()
+            _cl.shutdown()
+            _log('INFO', 'EXIT', 'clean shutdown')
+        PYEOF
