@@ -5,6 +5,10 @@ networks:
         name: etl-network
         external: true
 
+volumes:
+    images-data:
+        external: true
+
 services:
 
     # ─── Consumer — Kafka → Cassandra ───────────────────────────────────────────
@@ -14,6 +18,8 @@ services:
         networks:
             - etl-network
         restart: unless-stopped
+        volumes:
+            - images-data:/data/images:ro
         environment:
             KAFKA_BROKER: etl-kafka:9092
             TEXT_TOPIC: text-events
@@ -24,6 +30,7 @@ services:
             CASSANDRA_KEYSPACE: etl
             CASSANDRA_DC: dc1
             STATS_INTERVAL: "30"
+            IMAGE_DEST_PATH: /tmp/processed
             PYTHONUNBUFFERED: "1"
         command:
             - bash
@@ -31,7 +38,8 @@ services:
             - |
               pip install confluent-kafka cassandra-driver --quiet
               python - <<'EOF'
-              import os, json, signal, sys, time
+              import os, json, signal, sys, time, shutil
+              from pathlib import Path
               from datetime import datetime, timezone
               from confluent_kafka import Consumer, KafkaError
               from cassandra.cluster import Cluster
@@ -48,6 +56,9 @@ services:
               KEYSPACE       = os.environ["CASSANDRA_KEYSPACE"]
               LOCAL_DC       = os.environ["CASSANDRA_DC"]
               STATS_INTERVAL = int(os.environ.get("STATS_INTERVAL", "30"))
+              IMAGE_DEST     = Path(os.environ.get("IMAGE_DEST_PATH", "/tmp/processed"))
+
+              IMAGE_DEST.mkdir(parents=True, exist_ok=True)
 
               # ─── Logger ─────────────────────────────────────────────────────────
               def log(level, tag, msg):
@@ -65,6 +76,7 @@ services:
               log("INFO", "BOOT", f"cassandra_ks     = {KEYSPACE}")
               log("INFO", "BOOT", f"cassandra_dc     = {LOCAL_DC}")
               log("INFO", "BOOT", f"stats_interval   = {STATS_INTERVAL}s")
+              log("INFO", "BOOT", f"image_dest       = {IMAGE_DEST}")
               log("INFO", "BOOT", "=" * 70)
 
               # ─── Cassandra connection with retry ────────────────────────────────
@@ -84,11 +96,9 @@ services:
                           session.default_consistency_level = ConsistencyLevel.LOCAL_ONE
                           log("INFO", "CASS", f"TCP + session established (attempt {attempt})")
 
-                          # Real round-trip — proves the session works
                           row = session.execute("SELECT now() FROM system.local").one()
                           log("INFO", "CASS", f"round-trip OK, server time = {row[0]}")
 
-                          # Verify required tables exist before consuming
                           for tbl in ("text_events", "image_events"):
                               session.execute(f"SELECT * FROM {tbl} LIMIT 1")
                               log("INFO", "CASS", f"table verified: {KEYSPACE}.{tbl}")
@@ -179,6 +189,15 @@ services:
                       datetime.now(timezone.utc),
                   ))
 
+              def copy_image(event):
+                  src = Path(event.get("file_path", ""))
+                  if not src.exists():
+                      log("WARN", "COPY", f"source not found: {src} — skipping copy")
+                      return None
+                  dest = IMAGE_DEST / src.name
+                  shutil.copy2(src, dest)
+                  return dest
+
               def write_image(event):
                   loc = event.get("location", {}) or {}
                   session.execute(insert_image, (
@@ -198,7 +217,7 @@ services:
               # ─── Main loop ──────────────────────────────────────────────────────
               log("INFO", "MAIN", "entering poll loop")
 
-              stats = {"text": 0, "image": 0, "parse_err": 0, "write_err": 0}
+              stats = {"text": 0, "image": 0, "copy_ok": 0, "copy_skip": 0, "parse_err": 0, "write_err": 0}
               last_report = time.time()
               first_message_seen = False
 
@@ -210,6 +229,8 @@ services:
                           log("INFO", "STATS",
                               f"text={stats['text']} "
                               f"image={stats['image']} "
+                              f"copy_ok={stats['copy_ok']} "
+                              f"copy_skip={stats['copy_skip']} "
                               f"parse_err={stats['parse_err']} "
                               f"write_err={stats['write_err']} "
                               f"total={stats['text']+stats['image']}")
@@ -260,6 +281,16 @@ services:
 
                           elif topic == IMAGE_TOPIC:
                               t0 = time.monotonic()
+                              dest = copy_image(event)
+                              if dest:
+                                  stats["copy_ok"] += 1
+                                  log("INFO", "COPY",
+                                      f"id={event['event_id']} "
+                                      f"src={event.get('file_path')} "
+                                      f"dest={dest}")
+                              else:
+                                  stats["copy_skip"] += 1
+
                               write_image(event)
                               dt_ms = (time.monotonic() - t0) * 1000
                               stats["image"] += 1
@@ -288,6 +319,7 @@ services:
                   log("INFO", "SHUTDN", "=" * 70)
                   log("INFO", "SHUTDN",
                       f"final stats — text={stats['text']} image={stats['image']} "
+                      f"copy_ok={stats['copy_ok']} copy_skip={stats['copy_skip']} "
                       f"parse_err={stats['parse_err']} write_err={stats['write_err']}")
                   log("INFO", "SHUTDN", "closing Kafka consumer (commits final offsets, leaves group)")
                   consumer.close()
