@@ -801,7 +801,8 @@
     }
 
     function nowStr() {
-      return new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+      return new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })
+        .replace(',', '') + ' IST';
     }
 
     // ── Sparkline ────────────────────────────────────────────────────────────────
@@ -846,9 +847,10 @@
     function makeFeedItem(i) {
       const isText = Math.random() > 0.45;
       const now = new Date();
-      const hh = String(now.getHours()).padStart(2, '0');
-      const mm = String(now.getMinutes()).padStart(2, '0');
-      const ss = String(now.getSeconds()).padStart(2, '0');
+      const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      const hh = String(ist.getHours()).padStart(2, '0');
+      const mm = String(ist.getMinutes()).padStart(2, '0');
+      const ss = String(ist.getSeconds()).padStart(2, '0');
       const ms = String(now.getMilliseconds()).padStart(3, '0');
       return {
         id: Date.now() + Math.random(),
