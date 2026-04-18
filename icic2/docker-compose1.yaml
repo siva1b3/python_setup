@@ -1,0 +1,276 @@
+name: etl-pipeline
+
+networks:
+  etl-network:
+    name: etl-network
+    driver: bridge
+
+volumes:
+  images-data:
+    name: images-data
+  kafka-data:
+    name: kafka-data
+  kafka-secrets:
+    name: kafka-secrets
+  cassandra-data:
+    name: cassandra-data
+  elasticsearch-data:
+    name: elasticsearch-data
+  hdfs-namenode-data:
+    name: hdfs-namenode-data
+  hdfs-datanode-data:
+    name: hdfs-datanode-data
+
+services:
+
+  etl-gateway:
+    image: nginx:alpine
+    container_name: etl-gateway
+    restart: unless-stopped
+    networks:
+      - etl-network
+
+  etl-dozzle:
+    image: amir20/dozzle:v10
+    container_name: etl-dozzle
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "8888:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      DOZZLE_FILTER: "name=etl-"
+
+  etl-image-gen:
+    image: python:3.14-slim-bookworm
+    container_name: etl-image-gen
+    networks:
+      - etl-network
+    volumes:
+      - images-data:/data/images
+    restart: "no"
+    command:
+      - bash
+      - -c
+      - |
+        pip install pillow numpy --quiet
+        python - <<'EOF'
+        import os, random
+        import numpy as np
+        from PIL import Image
+
+        os.makedirs('/data/images', exist_ok=True)
+
+        for i in range(1000):
+            width  = random.randint(200, 1000)
+            height = random.randint(200, 1000)
+            mode   = random.choice(['RGB', 'L'])
+
+            if mode == 'RGB':
+                arr = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
+            else:
+                arr = np.random.randint(0, 255, (height, width), dtype=np.uint8)
+
+            img   = Image.fromarray(arr, mode=mode)
+            fname = f'/data/images/img-{i:03d}.png'
+            img.save(fname)
+            print(f'[{i+1:03d}/1000] {fname}  {width}x{height}  {mode}')
+
+        print('Done. 1000 images created.')
+        EOF
+
+  etl-kafka:
+    image: confluentinc/cp-kafka:8.1.2
+    container_name: etl-kafka
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+      - kafka-secrets:/etc/kafka/secrets
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://etl-kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@etl-kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    healthcheck:
+      test: [ "CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092" ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  etl-kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.4.2
+    container_name: etl-kafka-ui
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "8889:8080"
+    depends_on:
+      etl-kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: etl-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: etl-kafka:9092
+
+  etl-cassandra:
+    image: cassandra:5.0.7-bookworm
+    container_name: etl-cassandra
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "9042:9042"
+      - "7000:7000"
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    environment:
+      CASSANDRA_CLUSTER_NAME: etl-cluster
+      CASSANDRA_DC: dc1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      CASSANDRA_NUM_TOKENS: 16
+      CASSANDRA_LISTEN_ADDRESS: auto
+      CASSANDRA_BROADCAST_ADDRESS: etl-cassandra
+      CASSANDRA_RPC_ADDRESS: 0.0.0.0
+      CASSANDRA_BROADCAST_RPC_ADDRESS: etl-cassandra
+      MAX_HEAP_SIZE: 1G
+      HEAP_NEWSIZE: 200M
+    healthcheck:
+      test: [ "CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1" ]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  # ─── Cassandra Web UI ───────────────────────────────────────────────────────
+  etl-cassandra-ui:
+    image: ipushc/cassandra-web:v1.1.5
+    container_name: etl-cassandra-ui
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "8890:8083"
+    depends_on:
+      etl-cassandra:
+        condition: service_healthy
+    environment:
+      HOST_PORT: ":8083"
+      CASSANDRA_HOST: etl-cassandra
+      CASSANDRA_PORT: "9042"
+
+  etl-elasticsearch:
+    image: elasticsearch:9.3.2
+    container_name: etl-elasticsearch
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms256m -Xmx256m"
+      http.port: "9200"
+      http.max_content_length: 10MB
+      http.cors.enabled: "true"
+      http.cors.allow-origin: "http://localhost:1358,http://127.0.0.1:1358"
+      http.cors.allow-headers: "X-Requested-With,X-Auth-Token,Content-Type,Content-Length,Authorization"
+      http.cors.allow-credentials: "true"
+      network.publish_host: localhost
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1" ]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  etl-dejavu:
+    image: appbaseio/dejavu:3.10.0
+    container_name: etl-dejavu
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "1358:1358"
+    depends_on:
+      etl-elasticsearch:
+        condition: service_healthy
+
+  etl-namenode:
+    image: bde2020/hadoop-namenode:latest
+    container_name: etl-namenode
+    hostname: etl-namenode
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hdfs-namenode-data:/hadoop/dfs/name
+    environment:
+      CLUSTER_NAME: etl-cluster
+      CORE_CONF_fs_defaultFS: hdfs://etl-namenode:9000
+      HDFS_CONF_dfs_replication: "1"
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:9870 || exit 1" ]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # ─── HDFS DataNode ───────────────────────────────────────────────────────────
+  etl-datanode:
+    image: bde2020/hadoop-datanode:latest
+    container_name: etl-datanode
+    hostname: etl-datanode
+    restart: unless-stopped
+    networks:
+      - etl-network
+    depends_on:
+      etl-namenode:
+        condition: service_healthy
+    volumes:
+      - hdfs-datanode-data:/hadoop/dfs/data
+    environment:
+      CORE_CONF_fs_defaultFS: hdfs://etl-namenode:9000
+      HDFS_CONF_dfs_replication: "1"
+
+  etl-dashboard:
+    image: nginx:alpine
+    container_name: etl-dashboard
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "3000:80"
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      etl-namenode:
+        condition: service_healthy
+      etl-elasticsearch:
+        condition: service_healthy
+      etl-cassandra:
+        condition: service_healthy
+      etl-kafka:
+        condition: service_healthy
