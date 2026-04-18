@@ -11,7 +11,7 @@ volumes:
 
 services:
 
-    # ─── Consumer — Kafka → Cassandra ───────────────────────────────────────────
+    # ─── Consumer — Kafka → Cassandra + HDFS ────────────────────────────────────
     etl-consumer:
         image: python:3.14-slim-bookworm
         container_name: etl-consumer
@@ -29,22 +29,24 @@ services:
             CASSANDRA_PORT: "9042"
             CASSANDRA_KEYSPACE: etl
             CASSANDRA_DC: dc1
+            HDFS_URL: http://etl-namenode:9870
+            HDFS_IMAGES_PATH: /etl/images
             STATS_INTERVAL: "30"
-            IMAGE_DEST_PATH: /tmp/processed
             PYTHONUNBUFFERED: "1"
         command:
             - bash
             - -c
             - |
-              pip install confluent-kafka cassandra-driver --quiet
+              pip install confluent-kafka cassandra-driver hdfs --quiet
               python - <<'EOF'
-              import os, json, signal, sys, time, shutil
+              import os, json, signal, sys, time
               from pathlib import Path
               from datetime import datetime, timezone
-              from confluent_kafka import Consumer, KafkaError
+              from confluent_kafka import Consumer, KafkaError, Producer
               from cassandra.cluster import Cluster
               from cassandra.policies import DCAwareRoundRobinPolicy
               from cassandra.query import ConsistencyLevel
+              from hdfs import InsecureClient
 
               # ─── Config ─────────────────────────────────────────────────────────
               BROKER         = os.environ["KAFKA_BROKER"]
@@ -55,10 +57,9 @@ services:
               CASS_PORT      = int(os.environ["CASSANDRA_PORT"])
               KEYSPACE       = os.environ["CASSANDRA_KEYSPACE"]
               LOCAL_DC       = os.environ["CASSANDRA_DC"]
+              HDFS_URL       = os.environ["HDFS_URL"]
+              HDFS_IMG_PATH  = os.environ["HDFS_IMAGES_PATH"]
               STATS_INTERVAL = int(os.environ.get("STATS_INTERVAL", "30"))
-              IMAGE_DEST     = Path(os.environ.get("IMAGE_DEST_PATH", "/tmp/processed"))
-
-              IMAGE_DEST.mkdir(parents=True, exist_ok=True)
 
               # ─── Logger ─────────────────────────────────────────────────────────
               def log(level, tag, msg):
@@ -75,11 +76,12 @@ services:
               log("INFO", "BOOT", f"cassandra_host   = {CASS_HOST}:{CASS_PORT}")
               log("INFO", "BOOT", f"cassandra_ks     = {KEYSPACE}")
               log("INFO", "BOOT", f"cassandra_dc     = {LOCAL_DC}")
+              log("INFO", "BOOT", f"hdfs_url         = {HDFS_URL}")
+              log("INFO", "BOOT", f"hdfs_images_path = {HDFS_IMG_PATH}")
               log("INFO", "BOOT", f"stats_interval   = {STATS_INTERVAL}s")
-              log("INFO", "BOOT", f"image_dest       = {IMAGE_DEST}")
               log("INFO", "BOOT", "=" * 70)
 
-              # ─── Cassandra connection with retry ────────────────────────────────
+              # ─── Connect: Cassandra ──────────────────────────────────────────────
               def connect_cassandra(retries=15, delay=10):
                   log("INFO", "CASS", f"connecting to {CASS_HOST}:{CASS_PORT} (keyspace={KEYSPACE})")
                   for attempt in range(1, retries + 1):
@@ -94,7 +96,6 @@ services:
                           )
                           session = cluster.connect(KEYSPACE)
                           session.default_consistency_level = ConsistencyLevel.LOCAL_ONE
-                          log("INFO", "CASS", f"TCP + session established (attempt {attempt})")
 
                           row = session.execute("SELECT now() FROM system.local").one()
                           log("INFO", "CASS", f"round-trip OK, server time = {row[0]}")
@@ -103,7 +104,7 @@ services:
                               session.execute(f"SELECT * FROM {tbl} LIMIT 1")
                               log("INFO", "CASS", f"table verified: {KEYSPACE}.{tbl}")
 
-                          log("INFO", "CASS", "READY — Cassandra is fully operational")
+                          log("INFO", "CASS", "READY")
                           return cluster, session
 
                       except Exception as e:
@@ -113,9 +114,85 @@ services:
                               time.sleep(delay)
 
                   log("FATAL", "CASS", "exhausted all retries — exiting")
-                  raise RuntimeError("Cassandra unreachable after all retries")
+                  sys.exit(1)
 
+              # ─── Connect: Kafka ──────────────────────────────────────────────────
+              def connect_kafka(retries=10, delay=6):
+                  log("INFO", "KAFKA", f"verifying broker reachability: {BROKER}")
+                  for attempt in range(1, retries + 1):
+                      try:
+                          log("INFO", "KAFKA", f"attempt {attempt}/{retries}")
+                          probe = Producer({"bootstrap.servers": BROKER, "socket.timeout.ms": 5000})
+                          meta  = probe.list_topics(timeout=5)
+                          brokers = list(meta.brokers.values())
+                          topics  = list(meta.topics.keys())
+                          log("INFO", "KAFKA", f"broker metadata OK — brokers={len(brokers)} topics={topics}")
+
+                          for required in (TEXT_TOPIC, IMAGE_TOPIC):
+                              if required not in meta.topics:
+                                  raise RuntimeError(f"required topic missing: {required}")
+                              log("INFO", "KAFKA", f"topic verified: {required}")
+
+                          del probe
+                          log("INFO", "KAFKA", "READY")
+                          return
+
+                      except Exception as e:
+                          log("ERROR", "KAFKA", f"attempt {attempt} failed: {type(e).__name__}: {e}")
+                          if attempt < retries:
+                              log("INFO", "KAFKA", f"sleeping {delay}s before retry")
+                              time.sleep(delay)
+
+                  log("FATAL", "KAFKA", "exhausted all retries — exiting")
+                  sys.exit(1)
+
+              # ─── Connect: HDFS ───────────────────────────────────────────────────
+              def connect_hdfs(retries=15, delay=10):
+                  log("INFO", "HDFS", f"connecting to {HDFS_URL}")
+                  for attempt in range(1, retries + 1):
+                      try:
+                          log("INFO", "HDFS", f"attempt {attempt}/{retries}")
+                          client = InsecureClient(HDFS_URL, user="root")
+
+                          # Full round-trip: list root — fails if NameNode is in safe mode
+                          entries = client.list("/")
+                          log("INFO", "HDFS", f"root listing OK — entries={entries}")
+
+                          # Ensure target path exists
+                          client.makedirs(HDFS_IMG_PATH)
+                          log("INFO", "HDFS", f"target path confirmed: {HDFS_IMG_PATH}")
+
+                          # Write + delete probe file to verify DataNode write path
+                          probe_path = f"{HDFS_IMG_PATH}/.probe"
+                          with client.write(probe_path, overwrite=True) as f:
+                              f.write(b"probe")
+                          client.delete(probe_path)
+                          log("INFO", "HDFS", "write probe OK — DataNode is writable")
+
+                          log("INFO", "HDFS", "READY")
+                          return client
+
+                      except Exception as e:
+                          log("ERROR", "HDFS", f"attempt {attempt} failed: {type(e).__name__}: {e}")
+                          if attempt < retries:
+                              log("INFO", "HDFS", f"sleeping {delay}s before retry")
+                              time.sleep(delay)
+
+                  log("FATAL", "HDFS", "exhausted all retries — exiting")
+                  sys.exit(1)
+
+              # ─── Establish all connections before poll loop ──────────────────────
+              log("INFO", "BOOT", "--- phase 1: Cassandra ---")
               cluster, session = connect_cassandra()
+
+              log("INFO", "BOOT", "--- phase 2: Kafka ---")
+              connect_kafka()
+
+              log("INFO", "BOOT", "--- phase 3: HDFS ---")
+              hdfs_client = connect_hdfs()
+
+              log("INFO", "BOOT", "all connections established — proceeding to consume")
+              log("INFO", "BOOT", "=" * 70)
 
               # ─── Prepared statements ────────────────────────────────────────────
               log("INFO", "CASS", "preparing INSERT statements")
@@ -144,7 +221,6 @@ services:
                   "max.poll.interval.ms":  300000,
                   "client.id":             "etl-consumer",
               })
-              log("INFO", "KAFKA", "consumer object created (connection is lazy — happens on first poll)")
 
               # ─── Rebalance callbacks ────────────────────────────────────────────
               def on_assign(c, partitions):
@@ -189,14 +265,15 @@ services:
                       datetime.now(timezone.utc),
                   ))
 
-              def copy_image(event):
+              def upload_to_hdfs(event):
                   src = Path(event.get("file_path", ""))
                   if not src.exists():
-                      log("WARN", "COPY", f"source not found: {src} — skipping copy")
+                      log("WARN", "HDFS", f"source not found: {src} — skipping upload")
                       return None
-                  dest = IMAGE_DEST / src.name
-                  shutil.copy2(src, dest)
-                  return dest
+                  hdfs_dest = f"{HDFS_IMG_PATH}/{src.name}"
+                  with open(src, "rb") as f:
+                      hdfs_client.write(hdfs_dest, f, overwrite=True)
+                  return hdfs_dest
 
               def write_image(event):
                   loc = event.get("location", {}) or {}
@@ -217,7 +294,7 @@ services:
               # ─── Main loop ──────────────────────────────────────────────────────
               log("INFO", "MAIN", "entering poll loop")
 
-              stats = {"text": 0, "image": 0, "copy_ok": 0, "copy_skip": 0, "parse_err": 0, "write_err": 0}
+              stats = {"text": 0, "image": 0, "hdfs_ok": 0, "hdfs_skip": 0, "parse_err": 0, "write_err": 0}
               last_report = time.time()
               first_message_seen = False
 
@@ -229,8 +306,8 @@ services:
                           log("INFO", "STATS",
                               f"text={stats['text']} "
                               f"image={stats['image']} "
-                              f"copy_ok={stats['copy_ok']} "
-                              f"copy_skip={stats['copy_skip']} "
+                              f"hdfs_ok={stats['hdfs_ok']} "
+                              f"hdfs_skip={stats['hdfs_skip']} "
                               f"parse_err={stats['parse_err']} "
                               f"write_err={stats['write_err']} "
                               f"total={stats['text']+stats['image']}")
@@ -281,15 +358,15 @@ services:
 
                           elif topic == IMAGE_TOPIC:
                               t0 = time.monotonic()
-                              dest = copy_image(event)
-                              if dest:
-                                  stats["copy_ok"] += 1
-                                  log("INFO", "COPY",
+                              hdfs_dest = upload_to_hdfs(event)
+                              if hdfs_dest:
+                                  stats["hdfs_ok"] += 1
+                                  log("INFO", "HDFS",
                                       f"id={event['event_id']} "
                                       f"src={event.get('file_path')} "
-                                      f"dest={dest}")
+                                      f"dest={hdfs_dest}")
                               else:
-                                  stats["copy_skip"] += 1
+                                  stats["hdfs_skip"] += 1
 
                               write_image(event)
                               dt_ms = (time.monotonic() - t0) * 1000
@@ -319,9 +396,9 @@ services:
                   log("INFO", "SHUTDN", "=" * 70)
                   log("INFO", "SHUTDN",
                       f"final stats — text={stats['text']} image={stats['image']} "
-                      f"copy_ok={stats['copy_ok']} copy_skip={stats['copy_skip']} "
+                      f"hdfs_ok={stats['hdfs_ok']} hdfs_skip={stats['hdfs_skip']} "
                       f"parse_err={stats['parse_err']} write_err={stats['write_err']}")
-                  log("INFO", "SHUTDN", "closing Kafka consumer (commits final offsets, leaves group)")
+                  log("INFO", "SHUTDN", "closing Kafka consumer")
                   consumer.close()
                   log("INFO", "SHUTDN", "shutting down Cassandra cluster connection")
                   cluster.shutdown()

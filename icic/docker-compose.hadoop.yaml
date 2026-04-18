@@ -1,0 +1,55 @@
+name: etl-pipeline-hdfs
+
+networks:
+  etl-network:
+    name: etl-network
+    external: true
+
+volumes:
+  hdfs-namenode-data:
+    name: hdfs-namenode-data
+  hdfs-datanode-data:
+    name: hdfs-datanode-data
+
+services:
+
+  # ─── HDFS NameNode ───────────────────────────────────────────────────────────
+  etl-namenode:
+    image: bde2020/hadoop-namenode:latest
+    container_name: etl-namenode
+    hostname: etl-namenode
+    restart: unless-stopped
+    networks:
+      - etl-network
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hdfs-namenode-data:/hadoop/dfs/name
+    environment:
+      CLUSTER_NAME: etl-cluster
+      CORE_CONF_fs_defaultFS: hdfs://etl-namenode:9000
+      HDFS_CONF_dfs_replication: "1"
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:9870 || exit 1" ]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # ─── HDFS DataNode ───────────────────────────────────────────────────────────
+  etl-datanode:
+    image: bde2020/hadoop-datanode:latest
+    container_name: etl-datanode
+    hostname: etl-datanode
+    restart: unless-stopped
+    networks:
+      - etl-network
+    depends_on:
+      etl-namenode:
+        condition: service_healthy
+    volumes:
+      - hdfs-datanode-data:/hadoop/dfs/data
+    environment:
+      CORE_CONF_fs_defaultFS: hdfs://etl-namenode:9000
+      HDFS_CONF_dfs_replication: "1"
