@@ -109,8 +109,8 @@ services:
       test: [ "CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092" ]
       interval: 15s
       timeout: 10s
-      retries: 5
-      start_period: 30s
+      retries: 10 # was 5
+      start_period: 60s # was 30s
 
   etl-kafka-ui:
     image: ghcr.io/kafbat/kafka-ui:v1.4.2
@@ -154,8 +154,8 @@ services:
       test: [ "CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1" ]
       interval: 20s
       timeout: 10s
-      retries: 10
-      start_period: 120s
+      retries: 15 # was 10
+      start_period: 180s # was 120s
 
   # ─── Cassandra Web UI ───────────────────────────────────────────────────────
   etl-cassandra-ui:
@@ -199,8 +199,8 @@ services:
       test: [ "CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1" ]
       interval: 20s
       timeout: 10s
-      retries: 10
-      start_period: 60s
+      retries: 15 # was 10
+      start_period: 120s # was 60s
 
   etl-dejavu:
     image: appbaseio/dejavu:3.10.0
