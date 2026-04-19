@@ -987,7 +987,7 @@
       //   indices    → Object.keys(data.indices) excluding system indices (prefix '.')
       const fetchElastic = useCallback(async () => {
         try {
-          const res = await fetch('/api/elastic/_stats');
+          const res = await fetch('/api/se/_stats');
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
           const primaries = data._all?.primaries || {};
@@ -1008,7 +1008,7 @@
       // ── Fetch HDFS ─────────────────────────────────────────────────────────────
       const fetchHdfs = useCallback(async () => {
         try {
-          const res = await fetch('/api/hdfs/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState');
+          const res = await fetch('/api/fs/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState');
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
           const bean = (data.beans || [])[0] || {};

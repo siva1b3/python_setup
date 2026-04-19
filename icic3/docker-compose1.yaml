@@ -176,7 +176,6 @@ services:
       HOST_PORT: ":8083"
       CASSANDRA_HOST: svcd7
       CASSANDRA_PORT: "9042"
-    entrypoint: [ "/bin/sh", "-c", "sleep 15 && /app/service" ]
 
   svcf1:
     image: elasticsearch:9.3.2
@@ -195,16 +194,16 @@ services:
       http.port: "9200"
       http.max_content_length: 10MB
       http.cors.enabled: "true"
-      http.cors.allow-origin: "http://localhost:1358,http://127.0.0.1:1358"
+      http.cors.allow-origin: "'*'"
       http.cors.allow-headers: "X-Requested-With,X-Auth-Token,Content-Type,Content-Length,Authorization"
       http.cors.allow-credentials: "true"
-      network.publish_host: localhost
+      network.publish_host: _site_
     healthcheck:
       test: [ "CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1" ]
       interval: 20s
       timeout: 10s
       retries: 15
-      start_period: 120s
+      start_period: 180s
     depends_on:
       ndx00:
         condition: service_healthy
