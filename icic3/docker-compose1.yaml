@@ -40,8 +40,6 @@ services:
       - "8888:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    environment:
-      DOZZLE_FILTER: "name=vrx-"
 
   imgproc:
     image: python:3.14-slim-bookworm
@@ -178,6 +176,7 @@ services:
       HOST_PORT: ":8083"
       CASSANDRA_HOST: svcd7
       CASSANDRA_PORT: "9042"
+    entrypoint: [ "/bin/sh", "-c", "sleep 15 && /app/service" ]
 
   svcf1:
     image: elasticsearch:9.3.2
