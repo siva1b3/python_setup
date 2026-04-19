@@ -111,6 +111,9 @@ services:
       timeout: 10s
       retries: 10 # was 5
       start_period: 60s # was 30s
+    depends_on:
+      etl-elasticsearch:
+        condition: service_healthy
 
   etl-kafka-ui:
     image: ghcr.io/kafbat/kafka-ui:v1.4.2
@@ -156,6 +159,9 @@ services:
       timeout: 10s
       retries: 15 # was 10
       start_period: 180s # was 120s
+    depends_on:
+      etl-kafka:
+        condition: service_healthy
 
   # ─── Cassandra Web UI ───────────────────────────────────────────────────────
   etl-cassandra-ui:
@@ -201,6 +207,9 @@ services:
       timeout: 10s
       retries: 15 # was 10
       start_period: 120s # was 60s
+    depends_on:
+      etl-namenode:
+        condition: service_healthy
 
   etl-dejavu:
     image: appbaseio/dejavu:3.10.0

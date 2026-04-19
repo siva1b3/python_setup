@@ -55,8 +55,8 @@ sudo docker run hello-world
 docker compose version
 
 
-sudo usermod -aG docker $USER
-newgrp docker
+# sudo usermod -aG docker $USER
+# newgrp docker
 
 
 
