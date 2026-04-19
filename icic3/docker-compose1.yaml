@@ -1,0 +1,283 @@
+name: dxcore
+
+networks:
+  qnmesh:
+    name: qnmesh
+    driver: bridge
+
+volumes:
+  imgproc_data:
+    name: imgproc_data
+  svcb3_data:
+    name: svcb3_data
+  svcb3_secrets:
+    name: svcb3_secrets
+  cassandra-data:
+    name: cassandra-data
+  elasticsearch-data:
+    name: elasticsearch-data
+  hdfs-namenode-data:
+    name: hdfs-namenode-data
+  hdfs-datanode-data:
+    name: hdfs-datanode-data
+
+services:
+
+  fwgx:
+    image: nginx:alpine
+    container_name: fwgx
+    restart: unless-stopped
+    networks:
+      - qnmesh
+
+  logmon:
+    image: amir20/dozzle:v10
+    container_name: logmon
+    restart: unless-stopped
+    networks:
+      - qnmesh
+    ports:
+      - "8888:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      DOZZLE_FILTER: "name=vrx-"
+
+  imgproc:
+    image: python:3.14-slim-bookworm
+    container_name: imgproc
+    networks:
+      - qnmesh
+    volumes:
+      - imgproc_data:/data/images
+    restart: "no"
+    command:
+      - bash
+      - -c
+      - |
+        pip install pillow numpy --quiet
+        python - <<'EOF'
+        import os, random
+        import numpy as np
+        from PIL import Image
+
+        os.makedirs('/data/images', exist_ok=True)
+
+        for i in range(1000):
+            width  = random.randint(200, 1000)
+            height = random.randint(200, 1000)
+            mode   = random.choice(['RGB', 'L'])
+
+            if mode == 'RGB':
+                arr = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
+            else:
+                arr = np.random.randint(0, 255, (height, width), dtype=np.uint8)
+
+            img   = Image.fromarray(arr, mode=mode)
+            fname = f'/data/images/img-{i:03d}.png'
+            img.save(fname)
+            print(f'[{i+1:03d}/1000] {fname}  {width}x{height}  {mode}')
+
+        print('Done. 1000 images created.')
+        EOF
+
+  svcb3:
+    image: confluentinc/cp-kafka:8.1.2
+    container_name: svcb3
+    restart: unless-stopped
+    networks:
+      - qnmesh
+    ports:
+      - "9092:9092"
+    volumes:
+      - svcb3_data:/var/lib/kafka/data
+      - svcb3_secrets:/etc/kafka/secrets
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://svcb3:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@svcb3:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    healthcheck:
+      test: [ "CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092" ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    depends_on:
+      svcf1:
+        condition: service_healthy
+
+  svcb3x:
+    image: ghcr.io/kafbat/kafka-ui:v1.4.2
+    container_name: svcb3x
+    restart: unless-stopped
+    networks:
+      - qnmesh
+    ports:
+      - "8889:8080"
+    depends_on:
+      svcb3:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: cxcluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: svcb3:9092
+
+  svcd7:
+    image: cassandra:5.0.7-bookworm
+    container_name: svcd7
+    restart: unless-stopped
+    networks:
+      - qnmesh
+    ports:
+      - "9042:9042"
+      - "7000:7000"
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    environment:
+      CASSANDRA_CLUSTER_NAME: cxcluster
+      CASSANDRA_DC: dc1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      CASSANDRA_NUM_TOKENS: 16
+      CASSANDRA_LISTEN_ADDRESS: auto
+      CASSANDRA_BROADCAST_ADDRESS: svcd7
+      CASSANDRA_RPC_ADDRESS: 0.0.0.0
+      CASSANDRA_BROADCAST_RPC_ADDRESS: svcd7
+      MAX_HEAP_SIZE: 1G
+      HEAP_NEWSIZE: 200M
+    healthcheck:
+      test: [ "CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1" ]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 180s
+    depends_on:
+      svcb3:
+        condition: service_healthy
+
+  svcd7x:
+    image: ipushc/cassandra-web:v1.1.5
+    container_name: svcd7x
+    restart: unless-stopped
+    networks:
+      - qnmesh
+    ports:
+      - "8890:8083"
+    depends_on:
+      svcd7:
+        condition: service_healthy
+    environment:
+      HOST_PORT: ":8083"
+      CASSANDRA_HOST: svcd7
+      CASSANDRA_PORT: "9042"
+
+  svcf1:
+    image: elasticsearch:9.3.2
+    container_name: svcf1
+    restart: unless-stopped
+    networks:
+      - qnmesh
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms256m -Xmx256m"
+      http.port: "9200"
+      http.max_content_length: 10MB
+      http.cors.enabled: "true"
+      http.cors.allow-origin: "http://localhost:1358,http://127.0.0.1:1358"
+      http.cors.allow-headers: "X-Requested-With,X-Auth-Token,Content-Type,Content-Length,Authorization"
+      http.cors.allow-credentials: "true"
+      network.publish_host: localhost
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1" ]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 120s
+    depends_on:
+      ndx00:
+        condition: service_healthy
+
+  dejavu:
+    image: appbaseio/dejavu:3.10.0
+    container_name: dejavu
+    restart: unless-stopped
+    networks:
+      - qnmesh
+    ports:
+      - "1358:1358"
+    depends_on:
+      svcf1:
+        condition: service_healthy
+
+  ndx00:
+    image: bde2020/hadoop-namenode:latest
+    container_name: ndx00
+    hostname: ndx00
+    restart: unless-stopped
+    networks:
+      - qnmesh
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hdfs-namenode-data:/hadoop/dfs/name
+    environment:
+      CLUSTER_NAME: cxcluster
+      CORE_CONF_fs_defaultFS: hdfs://ndx00:9000
+      HDFS_CONF_dfs_replication: "1"
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:9870 || exit 1" ]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  ndx01:
+    image: bde2020/hadoop-datanode:latest
+    container_name: ndx01
+    hostname: ndx01
+    restart: unless-stopped
+    networks:
+      - qnmesh
+    depends_on:
+      ndx00:
+        condition: service_healthy
+    volumes:
+      - hdfs-datanode-data:/hadoop/dfs/data
+    environment:
+      CORE_CONF_fs_defaultFS: hdfs://ndx00:9000
+      HDFS_CONF_dfs_replication: "1"
+
+  uipanel:
+    image: nginx:alpine
+    container_name: uipanel
+    restart: unless-stopped
+    networks:
+      - qnmesh
+    ports:
+      - "3000:80"
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      ndx00:
+        condition: service_healthy
+      svcf1:
+        condition: service_healthy
+      svcd7:
+        condition: service_healthy
+      svcb3:
+        condition: service_healthy

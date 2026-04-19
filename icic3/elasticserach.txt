@@ -1,0 +1,3 @@
+Field                 What to enter
+Elasticsearch URL     http://localhost:9200
+Index Name            name of your index, or * for all indices
