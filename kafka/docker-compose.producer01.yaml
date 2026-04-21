@@ -1,0 +1,24 @@
+name: data-streaming-python
+
+networks:
+  streaming-network:
+    name: streaming-network
+    external: true
+
+services:
+  python-dev:
+    image: python:3.12
+    container_name: python-dev
+    hostname: python-dev
+    networks:
+      - streaming-network
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    command: >
+      bash -c "
+        apt-get update -qq && 
+        cd /app &&
+        git clone https://github.com/siva1b3/python_setup.git  && tail -f /dev/null
+      "
+    working_dir: /app

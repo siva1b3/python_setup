@@ -1,0 +1,14 @@
+name: data-streaming-network
+
+networks:
+  streaming-network:
+    name: streaming-network
+    driver: bridge
+
+services:
+  streaming-gateway:
+    image: nginx:alpine
+    container_name: streaming-gateway
+    restart: unless-stopped
+    networks:
+      - streaming-network
