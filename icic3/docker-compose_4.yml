@@ -1,0 +1,272 @@
+name: mfworker
+
+networks:
+    qnmesh:
+        name: qnmesh
+        external: true
+
+services:
+
+    xlatwk:
+        image: python:3.14-slim-bookworm
+        container_name: xlatwk
+        networks:
+            - qnmesh
+        restart: unless-stopped
+        environment:
+            HF_TOKEN: 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
+            ES_URL: http://svcf1:9200
+            ES_INDEX: text-events
+            ES_FIELD: content
+            MODEL_REPO: Helsinki-NLP/opus-mt-en-hi
+            MODEL_PATH: /app/mt_model
+            POLL_INTERVAL: "1"
+            EMPTY_BACKOFF: "5"
+            STATS_INTERVAL: "30"
+            PYTHONUNBUFFERED: "1"
+            PIP_DISABLE_PIP_VERSION_CHECK: "1"
+            PIP_NO_CACHE_DIR: "1"
+        command:
+            - bash
+            - -c
+            - |
+              set -e
+              echo "[boot] installing CPU-only torch and friends..."
+              pip install  \
+                  --extra-index-url https://download.pytorch.org/whl/cpu \
+                  torch \
+                  transformers \
+                  sentencepiece \
+                  sacremoses \
+                  elasticsearch \
+                  huggingface_hub
+              echo "[boot] pip install OK — launching worker"
+              python - <<'EOF'
+              import os, re, sys, time, signal
+              from datetime import datetime, timezone
+
+              # ─── Config ─────────────────────────────────────────────────────────
+              ES_URL          = os.environ["ES_URL"]
+              ES_INDEX        = os.environ["ES_INDEX"]
+              ES_FIELD        = os.environ.get("ES_FIELD", "content")
+              MODEL_REPO      = os.environ["MODEL_REPO"]
+              MODEL_PATH      = os.environ["MODEL_PATH"]
+              POLL_INTERVAL   = float(os.environ.get("POLL_INTERVAL", "1"))
+              EMPTY_BACKOFF   = float(os.environ.get("EMPTY_BACKOFF", "5"))
+              STATS_INTERVAL  = int(os.environ.get("STATS_INTERVAL", "30"))
+              HF_TOKEN        = os.environ.get("HF_TOKEN", "").strip() or None
+
+              # ─── Logger ─────────────────────────────────────────────────────────
+              def log(level, tag, msg):
+                  ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+                  print(f"[{ts}] [{level:5s}] [{tag:7s}] {msg}", flush=True)
+
+              # ─── Banner ─────────────────────────────────────────────────────────
+              log("INFO", "BOOT", "=" * 70)
+              log("INFO", "BOOT", "Translation worker starting")
+              log("INFO", "BOOT", f"es_url          = {ES_URL}")
+              log("INFO", "BOOT", f"es_index        = {ES_INDEX}")
+              log("INFO", "BOOT", f"es_field        = {ES_FIELD}")
+              log("INFO", "BOOT", f"model_repo      = {MODEL_REPO}")
+              log("INFO", "BOOT", f"model_path      = {MODEL_PATH}")
+              log("INFO", "BOOT", f"hf_token        = {'<set>' if HF_TOKEN else '<not set>'}")
+              log("INFO", "BOOT", f"poll_interval   = {POLL_INTERVAL}s")
+              log("INFO", "BOOT", f"empty_backoff   = {EMPTY_BACKOFF}s")
+              log("INFO", "BOOT", f"stats_interval  = {STATS_INTERVAL}s")
+              log("INFO", "BOOT", "=" * 70)
+
+              # ─── Phase 1: Download model ───────────────────────────────────────
+              log("INFO", "MODEL", "--- phase 1: download ---")
+              os.makedirs(MODEL_PATH, exist_ok=True)
+              from huggingface_hub import snapshot_download
+              retries = 5
+              for attempt in range(1, retries + 1):
+                  try:
+                      log("INFO", "MODEL", f"download attempt {attempt}/{retries} — repo={MODEL_REPO}")
+                      t0 = time.monotonic()
+                      snapshot_download(
+                          repo_id=MODEL_REPO,
+                          local_dir=MODEL_PATH,
+                          token=HF_TOKEN,
+                      )
+                      log("INFO", "MODEL",
+                          f"download complete in {time.monotonic()-t0:.1f}s — {MODEL_PATH}")
+                      break
+                  except Exception as e:
+                      log("ERROR", "MODEL", f"attempt {attempt} failed: {type(e).__name__}: {e}")
+                      if attempt < retries:
+                          time.sleep(10)
+              else:
+                  log("FATAL", "MODEL", "exhausted download retries — exiting")
+                  sys.exit(1)
+
+              # ─── Phase 2: Load model ───────────────────────────────────────────
+              os.environ["TRANSFORMERS_OFFLINE"] = "1"
+              os.environ["HF_DATASETS_OFFLINE"]  = "1"
+
+              log("INFO", "MODEL", "--- phase 2: load ---")
+              import torch
+              from transformers import MarianMTModel, MarianTokenizer
+
+              t0 = time.monotonic()
+              tokenizer = MarianTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
+              model     = MarianMTModel.from_pretrained(MODEL_PATH, local_files_only=True)
+              device    = "cuda" if torch.cuda.is_available() else "cpu"
+              model     = model.to(device)
+              model.eval()
+              log("INFO", "MODEL",
+                  f"loaded in {(time.monotonic()-t0)*1000:.1f}ms on device={device}")
+
+              # ─── Phase 3: Connect to Elasticsearch ─────────────────────────────
+              log("INFO", "BOOT", "--- phase 3: index ---")
+              from elasticsearch import Elasticsearch
+
+              def connect_elasticsearch(retries=15, delay=10):
+                  log("INFO", "ES", f"connecting to {ES_URL}")
+                  for attempt in range(1, retries + 1):
+                      try:
+                          log("INFO", "ES", f"attempt {attempt}/{retries}")
+                          client = Elasticsearch(ES_URL)
+                          info = client.info()
+                          log("INFO", "ES",
+                              f"connected — cluster={info['cluster_name']} "
+                              f"version={info['version']['number']}")
+                          health = client.cluster.health()
+                          log("INFO", "ES", f"cluster health = {health['status']}")
+                          if not client.indices.exists(index=ES_INDEX):
+                              log("WARN", "ES",
+                                  f"index '{ES_INDEX}' does not exist yet — will retry queries")
+                          else:
+                              log("INFO", "ES", f"index found: {ES_INDEX}")
+                          log("INFO", "ES", "READY")
+                          return client
+                      except Exception as e:
+                          log("ERROR", "ES", f"attempt {attempt} failed: {type(e).__name__}: {e}")
+                          if attempt < retries:
+                              log("INFO", "ES", f"sleeping {delay}s before retry")
+                              time.sleep(delay)
+                  log("FATAL", "ES", "exhausted all retries — exiting")
+                  sys.exit(1)
+
+              es = connect_elasticsearch()
+              log("INFO", "BOOT", "all connections established — entering work loop")
+              log("INFO", "BOOT", "=" * 70)
+
+              # ─── Shutdown handler ───────────────────────────────────────────────
+              running = True
+              def shutdown(sig, frame):
+                  global running
+                  log("WARN", "SIGNAL", f"signal {sig} received — initiating graceful shutdown")
+                  running = False
+              signal.signal(signal.SIGTERM, shutdown)
+              signal.signal(signal.SIGINT,  shutdown)
+
+              # ─── Helpers ────────────────────────────────────────────────────────
+              def clean_text(text):
+                  text = (text or "").strip()
+                  text = re.sub(r"\s+", " ", text)
+                  text = re.sub(r"[^\w\s.,!?'-]", "", text)
+                  return text
+
+              def translate(text):
+                  text = clean_text(text)
+                  if not text:
+                      return ""
+                  inputs = tokenizer(text, return_tensors="pt",
+                                     padding=True, truncation=True, max_length=512).to(device)
+                  with torch.no_grad():
+                      outputs = model.generate(**inputs, max_new_tokens=512)
+                  return tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+              def fetch_random_doc():
+                  body = {
+                      "size": 1,
+                      "_source": ["event_id", ES_FIELD],
+                      "query": {
+                          "function_score": {
+                              "query":         {"match_all": {}},
+                              "random_score":  {},
+                              "boost_mode":    "replace"
+                          }
+                      }
+                  }
+                  res = es.search(index=ES_INDEX, body=body)
+                  hits = res.get("hits", {}).get("hits", [])
+                  return hits[0] if hits else None
+
+              # ─── Main loop ──────────────────────────────────────────────────────
+              log("INFO", "MAIN", "entering work loop")
+
+              stats = {"translated": 0, "empty": 0, "es_err": 0, "xlat_err": 0}
+              last_report = time.time()
+
+              try:
+                  while running:
+                      if time.time() - last_report > STATS_INTERVAL:
+                          log("INFO", "STATS",
+                              f"translated={stats['translated']} "
+                              f"empty={stats['empty']} "
+                              f"es_err={stats['es_err']} "
+                              f"xlat_err={stats['xlat_err']}")
+                          last_report = time.time()
+
+                      try:
+                          hit = fetch_random_doc()
+                      except Exception as e:
+                          stats["es_err"] += 1
+                          log("ERROR", "ES",
+                              f"query failed: {type(e).__name__}: {e} — backing off {EMPTY_BACKOFF}s")
+                          time.sleep(EMPTY_BACKOFF)
+                          continue
+
+                      if not hit:
+                          stats["empty"] += 1
+                          log("WARN", "EMPTY",
+                              f"index '{ES_INDEX}' has no documents — sleeping {EMPTY_BACKOFF}s")
+                          time.sleep(EMPTY_BACKOFF)
+                          continue
+
+                      doc_id   = hit.get("_id", "?")
+                      src      = hit.get("_source", {}) or {}
+                      event_id = src.get("event_id", doc_id)
+                      original = src.get(ES_FIELD, "")
+
+                      if not original or not original.strip():
+                          log("WARN", "SKIP",
+                              f"id={event_id} field '{ES_FIELD}' is empty — skipping")
+                          time.sleep(POLL_INTERVAL)
+                          continue
+
+                      try:
+                          t0 = time.monotonic()
+                          hindi = translate(original)
+                          dt_ms = (time.monotonic() - t0) * 1000
+                      except Exception as e:
+                          stats["xlat_err"] += 1
+                          log("ERROR", "XLAT",
+                              f"id={event_id} translate failed: {type(e).__name__}: {e}")
+                          time.sleep(POLL_INTERVAL)
+                          continue
+
+                      stats["translated"] += 1
+                      print("", flush=True)
+                      print("=" * 70, flush=True)
+                      print(f"id   : {event_id}", flush=True)
+                      print(f"time : {datetime.now(timezone.utc).strftime('%H:%M:%S.%f')[:-3]}", flush=True)
+                      print(f"took : {dt_ms:.1f}ms  device={device}", flush=True)
+                      print(f"#en  : {original}", flush=True)
+                      print(f"#hi  : {hindi}", flush=True)
+                      print("=" * 70, flush=True)
+
+                      time.sleep(POLL_INTERVAL)
+
+              finally:
+                  log("INFO", "SHUTDN", "=" * 70)
+                  log("INFO", "SHUTDN",
+                      f"final stats — translated={stats['translated']} "
+                      f"empty={stats['empty']} "
+                      f"es_err={stats['es_err']} "
+                      f"xlat_err={stats['xlat_err']}")
+                  log("INFO", "SHUTDN", "clean shutdown complete")
+                  log("INFO", "SHUTDN", "=" * 70)
+              EOF
