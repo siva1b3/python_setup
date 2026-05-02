@@ -69,6 +69,29 @@ services:
                   "Researchers map complete neural connectome",
               ]
 
+              SENTENCES = [
+                  "The election results were announced after a long recount in three states.",
+                  "Scientists have discovered a new species of deep-sea fish near the Mariana Trench.",
+                  "The new battery technology is expected to double the range of electric vehicles.",
+                  "A research team published findings linking sleep quality to long-term memory.",
+                  "The spacecraft successfully entered orbit around Mars early this morning.",
+                  "Global temperatures reached a new record high during the summer months.",
+                  "Open source contributors released the second major version of the framework.",
+                  "The team won the national championship for the first time in a decade.",
+                  "Researchers have mapped the complete neural connectome of a small mammal.",
+                  "A diet rich in vegetables was linked to better cognitive performance in older adults.",
+                  "The new artificial intelligence model can translate between fifty languages.",
+                  "Doctors warn that air pollution levels in major cities continue to rise each year.",
+                  "An international study found that exercise improves mental health in young adults.",
+                  "The government announced new policies to support renewable energy projects.",
+                  "Astronomers observed an unusual signal coming from a distant galaxy.",
+                  "A small village in the mountains is using solar power for all its electricity.",
+                  "The technology company released a new smartphone with a longer lasting battery.",
+                  "Farmers in the region are adopting new techniques to deal with changing weather.",
+                  "The library opened its doors to the public after a two year renovation.",
+                  "Children who read for thirty minutes a day perform better in school exams.",
+              ]
+
               sent_count      = 0
               delivered_count = 0
               failed_count    = 0
@@ -88,7 +111,9 @@ services:
                           f"size={len(msg.value())}B")
 
               def build_event(i):
-                  words = random.randint(80, 400)
+                  # Pick 2–5 random real sentences and join — gives varied, translatable content
+                  picked = random.sample(SENTENCES, k=random.randint(2, 5))
+                  content = " ".join(picked)
                   return {
                       "event_id":   f"evt-text-{i:06d}",
                       "timestamp":  datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -96,8 +121,8 @@ services:
                       "language":   "en",
                       "category":   random.choice(CATEGORIES),
                       "title":      random.choice(TITLES),
-                      "content":    f"Sample content for event {i:06d}. " * (words // 10),
-                      "word_count": words,
+                      "content":    content,
+                      "word_count": len(content.split()),
                       "tags":       random.sample(TAGS_POOL, k=random.randint(2, 4)),
                   }
 
