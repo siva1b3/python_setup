@@ -1,0 +1,330 @@
+name: ztrelay
+
+networks:
+    qnmesh:
+        name: qnmesh
+        external: true
+
+services:
+
+    container_02:
+        image: python:3.14-slim-bookworm
+        container_name: container_02
+        hostname: container_02
+        networks:
+            - qnmesh
+        ports:
+            - "18080:8080"
+        restart: unless-stopped
+        environment:
+            KAFKA_BROKER: svcb3:9092
+            TEXT_TOPIC: text-events
+            HTTP_PORT: "8080"
+            PYTHONUNBUFFERED: "1"
+        command:
+            - bash
+            - -c
+            - |
+              pip install confluent-kafka fastapi uvicorn --quiet
+              python - <<'EOF'
+              import os,signal,sys,threading,time,json
+              from collections import deque
+              from fastapi import FastAPI,Request,Response
+              from fastapi.responses import HTMLResponse,JSONResponse
+              from confluent_kafka import Producer
+              import uvicorn
+
+              _a1=os.environ["KAFKA_BROKER"]
+              _a2=os.environ["TEXT_TOPIC"]
+              _a3=int(os.environ.get("HTTP_PORT","8080"))
+
+              def _f1(m): print(f"[C2] {m}",flush=True)
+
+              _b1=Producer({"bootstrap.servers":_a1,"linger.ms":5,"client.id":"x9k2m7q4"})
+
+              _c1=threading.Event()
+              def _f2():
+                  while not _c1.is_set(): _b1.poll(0.1)
+              threading.Thread(target=_f2,daemon=True).start()
+
+              _d1=FastAPI()
+              _e1=time.time()
+              _e2=0
+              _e3=deque(maxlen=10)
+
+              @_d1.post("/events")
+              async def _f3(r: Request):
+                  global _e2
+                  _x=await r.body()
+                  _k="?"
+                  try:
+                      _j=json.loads(_x)
+                      _k=_j.get("event_id","?")
+                  except Exception: pass
+                  _b1.produce(_a2,key=_k,value=_x)
+                  _e2+=1
+                  _e3.appendleft({"p":time.strftime("%H:%M:%S"),"q":_k,"r":len(_x)})
+                  _f1(f"#{_e2} -> kafka ({len(_x)}B)")
+                  return Response(status_code=200)
+
+              @_d1.get("/stats")
+              def _f4():
+                  return JSONResponse({"u":int(time.time()-_e1),"v":_a1,"w":_a2,"x":_e2,"y":len(_b1),"z":list(_e3)})
+
+              _g1="""<!doctype html>
+              <html><head><meta charset="utf-8"><title>container_02</title>
+              <meta http-equiv="refresh" content="5">
+              <style>
+                body{font-family:monospace;background:#111;color:#ddd;padding:20px}
+                h1{color:#4af}
+                table{border-collapse:collapse;margin-top:10px}
+                td,th{border:1px solid #333;padding:4px 10px;text-align:left}
+                th{background:#222;color:#4af}
+                .k{color:#888}
+              </style></head><body>
+              <h1>container_02 — kafka gateway</h1>
+              <div id="info">loading...</div>
+              <h3>last 10 received</h3>
+              <table id="tbl"><thead>
+                <tr><th>time</th><th>event_id</th><th>size</th></tr>
+              </thead><tbody></tbody></table>
+              <script>
+                async function refresh(){
+                  const r = await fetch('/stats');
+                  const s = await r.json();
+                  document.getElementById('info').innerHTML =
+                    `<span class="k">broker</span> $${s.v} ` +
+                    `<span class="k">topic</span> $${s.w} ` +
+                    `<span class="k">uptime</span> $${s.u}s<br>` +
+                    `<span class="k">received</span> $${s.x} ` +
+                    `<span class="k">kafka_queue</span> $${s.y}`;
+                  const tb = document.querySelector('#tbl tbody');
+                  tb.innerHTML = s.z.map(r =>
+                    `<tr><td>$${r.p}</td><td>$${r.q}</td><td>$${r.r}B</td></tr>`
+                  ).join('');
+                }
+                refresh(); setInterval(refresh, 2000);
+              </script>
+              </body></html>"""
+
+              @_d1.get("/", response_class=HTMLResponse)
+              def _f5(): return _g1
+
+              def _f6(s,f):
+                  _f1("shutdown"); _c1.set(); _b1.flush(timeout=10); sys.exit(0)
+              signal.signal(signal.SIGTERM,_f6)
+              signal.signal(signal.SIGINT,_f6)
+
+              _f1(f"broker={_a1} topic={_a2} port={_a3}")
+              uvicorn.run(_d1,host="0.0.0.0",port=_a3,log_level="warning")
+              EOF
+
+    container_01:
+        image: python:3.14-slim-bookworm
+        container_name: container_01
+        hostname: container_01
+        networks:
+            - qnmesh
+        ports:
+            - "18081:8081"
+        depends_on:
+            - container_02
+        restart: "no"
+        environment:
+            GATEWAY_URL: http://container_02:8080/events
+            UI_PORT: "8081"
+            PRODUCE_RATE: "1"
+            PRODUCE_COUNT: "1000000"
+            PYTHONUNBUFFERED: "1"
+        command:
+            - bash
+            - -c
+            - |
+              pip install requests fastapi uvicorn --quiet
+              python - <<'EOF'
+              import os,json,time,random,threading
+              from collections import deque
+              from datetime import datetime,timezone
+              import requests
+              from fastapi import FastAPI
+              from fastapi.responses import HTMLResponse,JSONResponse
+              import uvicorn
+
+              _h1=os.environ["GATEWAY_URL"]
+              _h2=int(os.environ.get("UI_PORT","8081"))
+              _h3=float(os.environ.get("PRODUCE_RATE","5"))
+              _h4=int(os.environ.get("PRODUCE_COUNT","100"))
+              _h5=1.0/_h3
+
+              def _f1(m): print(f"[C1] {m}",flush=True)
+
+              _i1=requests.Session()
+
+              _j1=["news-scraper","rss-feed","web-crawler"]
+              _j2=["technology","science","politics","sports","health"]
+              _j3=["ai","research","climate","election","space","health","data"]
+              _j4=[
+                  "New AI model released by research lab",
+                  "Scientists discover new exoplanet",
+                  "Election results finalized in three states",
+                  "Team wins championship after decade",
+                  "Study links diet to cognitive performance",
+                  "Spacecraft completes Mars orbit insertion",
+                  "Open source framework reaches version 2.0",
+                  "Global temperatures hit record high",
+                  "New battery technology doubles EV range",
+                  "Researchers map complete neural connectome",
+              ]
+              _j5=[
+                  "The election results were announced after a long recount in three states.",
+                  "Scientists have discovered a new species of deep-sea fish near the Mariana Trench.",
+                  "The new battery technology is expected to double the range of electric vehicles.",
+                  "A research team published findings linking sleep quality to long-term memory.",
+                  "The spacecraft successfully entered orbit around Mars early this morning.",
+                  "Global temperatures reached a new record high during the summer months.",
+                  "Open source contributors released the second major version of the framework.",
+                  "The team won the national championship for the first time in a decade.",
+                  "Researchers have mapped the complete neural connectome of a small mammal.",
+                  "A diet rich in vegetables was linked to better cognitive performance in older adults.",
+                  "The new artificial intelligence model can translate between fifty languages.",
+                  "Doctors warn that air pollution levels in major cities continue to rise each year.",
+                  "An international study found that exercise improves mental health in young adults.",
+                  "The government announced new policies to support renewable energy projects.",
+                  "Astronomers observed an unusual signal coming from a distant galaxy.",
+                  "A small village in the mountains is using solar power for all its electricity.",
+                  "The technology company released a new smartphone with a longer lasting battery.",
+                  "Farmers in the region are adopting new techniques to deal with changing weather.",
+                  "The library opened its doors to the public after a two year renovation.",
+                  "Children who read for thirty minutes a day perform better in school exams.",
+              ]
+
+              def _f7(n):
+                  _p=random.sample(_j5,k=random.randint(2,5))
+                  _c=" ".join(_p)
+                  return {
+                      "event_id":f"evt-text-{n:06d}",
+                      "timestamp":datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      "source":random.choice(_j1),
+                      "language":"en",
+                      "category":random.choice(_j2),
+                      "title":random.choice(_j4),
+                      "content":_c,
+                      "word_count":len(_c.split()),
+                      "tags":random.sample(_j3,k=random.randint(2,4)),
+                  }
+
+              _k1={"a":0,"b":0,"c":0,"d":"","e":True,"f":time.time()}
+              _k2=deque(maxlen=10)
+
+              _d2=FastAPI()
+
+              @_d2.get("/stats")
+              def _f8():
+                  return JSONResponse({
+                      "u":int(time.time()-_k1["f"]),
+                      "v":_h1,
+                      "w":_h3,
+                      "x":_h4,
+                      "y":_k1["a"],
+                      "z":_k1["b"],
+                      "i":_k1["c"],
+                      "j":_k1["e"],
+                      "k":_k1["d"],
+                      "l":list(_k2),
+                  })
+
+              _g2="""<!doctype html>
+              <html><head><meta charset="utf-8"><title>container_01</title>
+              <meta http-equiv="refresh" content="5">
+              <style>
+                body{font-family:monospace;background:#111;color:#ddd;padding:20px}
+                h1{color:#4f8}
+                table{border-collapse:collapse;margin-top:10px}
+                td,th{border:1px solid #333;padding:4px 10px;text-align:left}
+                th{background:#222;color:#4f8}
+                .k{color:#888}
+                .e{color:#f66}
+                .ok{color:#4f8}
+              </style></head><body>
+              <h1>container_01 — generator</h1>
+              <div id="info">loading...</div>
+              <div id="err"></div>
+              <h3>last 10 sent</h3>
+              <table id="tbl"><thead>
+                <tr><th>time</th><th>event_id</th><th>category</th><th>size</th><th>http</th></tr>
+              </thead><tbody></tbody></table>
+              <script>
+                async function refresh(){
+                  const r = await fetch('/stats');
+                  const s = await r.json();
+                  document.getElementById('info').innerHTML =
+                    `<span class="k">gateway</span> $${s.v} ` +
+                    `<span class="k">rate</span> $${s.w}/s ` +
+                    `<span class="k">uptime</span> $${s.u}s<br>` +
+                    `<span class="k">progress</span> $${s.i} / $${s.x} ` +
+                    `<span class="k">ok</span> <span class="ok">$${s.y}</span> ` +
+                    `<span class="k">err</span> <span class="e">$${s.z}</span> ` +
+                    `<span class="k">running</span> $${s.j}`;
+                  document.getElementById('err').innerHTML =
+                    s.k ? `<span class="e">last error: $${s.k}</span>` : '';
+                  const tb = document.querySelector('#tbl tbody');
+                  tb.innerHTML = s.l.map(r =>
+                    `<tr><td>$${r.p}</td><td>$${r.q}</td><td>$${r.s}</td>` +
+                    `<td>$${r.r}B</td><td class="$${r.t==200?'ok':'e'}">$${r.t}</td></tr>`
+                  ).join('');
+                }
+                refresh(); setInterval(refresh, 2000);
+              </script>
+              </body></html>"""
+
+              @_d2.get("/", response_class=HTMLResponse)
+              def _f9(): return _g2
+
+              def _f10():
+                  uvicorn.run(_d2,host="0.0.0.0",port=_h2,log_level="warning")
+              threading.Thread(target=_f10,daemon=True).start()
+
+              _f1(f"gateway={_h1} rate={_h3} count={_h4} ui_port={_h2}")
+
+              _t1=time.monotonic()
+              n=0
+              try:
+                  while _h4==0 or n<_h4:
+                      _e=_f7(n)
+                      _y=json.dumps(_e)
+                      _hc=0
+                      try:
+                          _r=_i1.post(_h1,data=_y,headers={"Content-Type":"application/json"},timeout=5)
+                          _hc=_r.status_code
+                          if _r.status_code==200:
+                              _k1["a"]+=1
+                              _f1(f"#{n+1} sent ({len(_y)}B)")
+                          else:
+                              _k1["b"]+=1
+                              _k1["d"]=f"http {_r.status_code}"
+                              _f1(f"#{n+1} http={_r.status_code}")
+                      except Exception as _x:
+                          _k1["b"]+=1
+                          _k1["d"]=str(_x)[:120]
+                          _f1(f"#{n+1} fail: {_x}")
+
+                      _k2.appendleft({
+                          "p":time.strftime("%H:%M:%S"),
+                          "q":_e["event_id"],
+                          "s":_e["category"],
+                          "r":len(_y),
+                          "t":_hc,
+                      })
+
+                      n+=1
+                      _k1["c"]=n
+                      _t1+=_h5
+                      _sl=_t1-time.monotonic()
+                      if _sl>0: time.sleep(_sl)
+                      else: _t1=time.monotonic()
+              except KeyboardInterrupt: pass
+              finally:
+                  _k1["e"]=False
+                  _f1(f"done ok={_k1['a']} err={_k1['b']}")
+                  while True: time.sleep(60)
+              EOF
