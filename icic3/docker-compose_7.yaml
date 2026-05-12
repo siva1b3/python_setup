@@ -6,29 +6,18 @@ networks:
     driver: bridge
 
 volumes:
-  rand_imgproc_data:
-    name: rand_imgproc_data
+  imgproc_data_1:
+    name: imgproc_data_1
   corpus_data:
     name: corpus_data
 
 services:
 
-  logmon:
-    image: amir20/dozzle:v10
-    container_name: logmon
-    restart: unless-stopped
-    networks:
-      - qnmesh
-    ports:
-      - "8888:8080"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-
   # ─────────────────────────────────────────────
-  # Food-101 image loader
-  # 20 categories x 1 image = 20 large images
-  # Uses public dataset[idx] API — no private attributes
-  # Saved to rand_imgproc_data volume
+  # Image loader
+  # 20 food categories, 1 image each
+  # Direct Wikimedia Commons URLs — no API key, no archive
+  # Saved to imgproc_data_1 volume
   # ─────────────────────────────────────────────
   img_loader:
     image: python:3.14-slim-bookworm
@@ -36,110 +25,78 @@ services:
     networks:
       - qnmesh
     volumes:
-      - rand_imgproc_data:/data/images
+      - imgproc_data_1:/data/images
     restart: "no"
     command:
       - bash
       - -c
       - |
-        pip install torch torchvision pillow --quiet --index-url https://download.pytorch.org/whl/cpu
+        pip install pillow requests --quiet
         python - <<'EOF'
-        import os
-        import torchvision.datasets as datasets
+        import os, time
+        import requests
         from PIL import Image
+        from io import BytesIO
 
         SAVE_DIR = "/data/images"
         os.makedirs(SAVE_DIR, exist_ok=True)
 
-        # Food-101 uses these exact underscore names internally
-        SELECTED_CATEGORIES = [
-            "burger",
-            "pizza",
-            "sushi",
-            "steak",
-            "ice_cream",
-            "ramen",
-            "tacos",
-            "waffles",
-            "donuts",
-            "hot_dog",
-            "french_fries",
-            "fried_rice",
-            "grilled_salmon",
-            "chocolate_cake",
-            "caesar_salad",
-            "chicken_wings",
-            "clam_chowder",
-            "dumplings",
-            "eggs_benedict",
-            "pancakes",
-        ]
+        # Direct Wikimedia Commons URLs — stable, free, no API key
+        IMAGES = {
+            "pizza":          "https://upload.wikimedia.org/wikipedia/commons/a/a3/Eq_it-na_pizza-margherita_sep2005_sml.jpg",
+            "sushi":          "https://upload.wikimedia.org/wikipedia/commons/6/60/Sushi_platter.jpg",
+            "steak":          "https://upload.wikimedia.org/wikipedia/commons/2/2e/Beef_steak_2.jpg",
+            "ice_cream":      "https://upload.wikimedia.org/wikipedia/commons/2/2e/Ice_cream_with_whipped_cream%2C_chocolate_syrup%2C_and_a_wafer_%28cropped%29.jpg",
+            "tacos":          "https://upload.wikimedia.org/wikipedia/commons/7/73/001_Tacos_de_carnitas%2C_Abasto_market%2C_Mexico_City.jpg",
+            "waffles":        "https://upload.wikimedia.org/wikipedia/commons/3/3c/Waffles_with_Strawberries.jpg",
+            "donuts":         "https://upload.wikimedia.org/wikipedia/commons/a/a5/Glazed-Donut.jpg",
+            "hot_dog":        "https://upload.wikimedia.org/wikipedia/commons/f/fb/Hotdog_-_Evan_Swigart.jpg",
+            "fried_rice":     "https://upload.wikimedia.org/wikipedia/commons/2/22/Fried_rice_-_lower_res.jpg",
+            "chocolate_cake": "https://upload.wikimedia.org/wikipedia/commons/4/4b/Chocolate_Cake_Flourless_%281%29.jpg",
+            "caesar_salad":   "https://upload.wikimedia.org/wikipedia/commons/3/3f/Caesar_salad_%281%29.jpg",
+            "chicken_wings":  "https://upload.wikimedia.org/wikipedia/commons/6/6a/Baked_Chicken_Wings.jpg",
+            "dumplings":      "https://upload.wikimedia.org/wikipedia/commons/9/91/Dim_sum_at_Yank_Sing.jpg",
+            "eggs_benedict":  "https://upload.wikimedia.org/wikipedia/commons/2/29/Eggs_Benedict.jpg",
+            "hamburger":      "https://upload.wikimedia.org/wikipedia/commons/4/4d/Hamburger_-_499700723.jpg",
+            "clam_chowder":   "https://upload.wikimedia.org/wikipedia/commons/0/04/Clam_chowder.jpg",
+            "ramen":          "https://upload.wikimedia.org/wikipedia/commons/e/e3/Shoyu_Ramen.jpg",
+            "french_fries":   "https://upload.wikimedia.org/wikipedia/commons/f/f8/Potato-Chips.jpg",
+            "grilled_salmon": "https://upload.wikimedia.org/wikipedia/commons/9/90/Grilled_Salmon.jpg",
+            "pancakes":       "https://upload.wikimedia.org/wikipedia/commons/0/04/Pancakes_with_strawberries.jpg",
+        }
 
-        print("[INFO] Downloading Food-101 dataset...")
-        dataset = datasets.Food101(root="/tmp/food101", split="train", download=True)
-        print(f"[INFO] Dataset loaded — {len(dataset)} total images available")
+        saved = 0
+        total = len(IMAGES)
 
-        # Public API: dataset.classes is the list of category name strings
-        available_classes = dataset.classes
-        print(f"[INFO] Available categories: {len(available_classes)}")
+        for category, url in IMAGES.items():
+            dst = f"{SAVE_DIR}/{category}.jpg"
+            try:
+                resp = requests.get(url, timeout=30, allow_redirects=True,
+                                    headers={"User-Agent": "Mozilla/5.0"})
+                resp.raise_for_status()
 
-        # Validate all selected categories exist in the dataset
-        missing = [c for c in SELECTED_CATEGORIES if c not in available_classes]
-        if missing:
-            print(f"[WARN] These categories not found in Food-101, will be skipped: {missing}")
+                img = Image.open(BytesIO(resp.content)).convert("RGB")
+                img.save(dst, "JPEG", quality=95)
 
-        # Map category name -> integer label index
-        class_to_idx = {c: i for i, c in enumerate(available_classes)}
-        idx_to_class = {i: c for i, c in enumerate(available_classes)}
+                saved += 1
+                w, h = img.size
+                print(f"[{saved:02d}/{total}] saved {dst}  {w}x{h}  ({len(resp.content)//1024}KB)")
+            except Exception as e:
+                print(f"[WARN] failed {category}: {e}")
 
-        # Only keep categories that actually exist
-        valid_categories  = [c for c in SELECTED_CATEGORIES if c in class_to_idx]
-        selected_idx_set  = {class_to_idx[c] for c in valid_categories}
-
-        # collected[category_name] = False until one image is saved
-        collected = {c: False for c in valid_categories}
-        saved     = 0
-        total     = len(valid_categories)
-
-        # Iterate using public dataset[idx] — returns (PIL.Image, int label)
-        for idx in range(len(dataset)):
-            img, label_idx = dataset[idx]
-
-            if label_idx not in selected_idx_set:
-                continue
-
-            label_name = idx_to_class[label_idx]
-
-            if collected[label_name]:
-                continue  # already saved one for this category
-
-            fname = f"{SAVE_DIR}/{label_name}.jpg"
-            img.convert("RGB").save(fname, "JPEG", quality=95)
-
-            collected[label_name] = True
-            saved += 1
-            w, h = img.size
-            print(f"[{saved:02d}/{total}] saved {fname}  {w}x{h}")
-
-            if all(collected.values()):
-                break  # all categories filled — stop early
+            time.sleep(0.3)
 
         print("=" * 60)
         print(f"Done. {saved}/{total} images saved to {SAVE_DIR}")
-
-        # Report any categories that had no images found
-        not_saved = [c for c, done in collected.items() if not done]
-        if not_saved:
-            print(f"[WARN] No image found for: {not_saved}")
         print("=" * 60)
         EOF
 
   # ─────────────────────────────────────────────
   # AG News text corpus loader
   # 4 categories x 10,000 records = 40,000 total
-  # AG News HuggingFace text field format:
-  #   "Title text - Description sentence one. Sentence two."
-  # Split on first " - " to get title and description
+  # Step 1: Save flat string array per category file
+  # Step 2: Combine into single corpus.json
+  #         filename = title, string = description
   # Saved to corpus_data volume
   # ─────────────────────────────────────────────
   text_loader:
@@ -164,8 +121,6 @@ services:
 
         os.makedirs(SAVE_DIR, exist_ok=True)
 
-        # AG News label mapping
-        # 0 = World, 1 = Sports, 2 = Business, 3 = Sci/Tech
         CATEGORY_MAP = {
             0: "world",
             1: "sports",
@@ -173,25 +128,7 @@ services:
             3: "technology",
         }
 
-        def split_title_description(raw: str):
-            """
-            AG News HuggingFace text field format:
-              "Some Title Here - First sentence of description. More text."
-            Split on first ' - ' to separate title from description.
-            Fall back to full text as description if separator not found.
-            """
-            raw = raw.strip()
-            sep = " - "
-            idx = raw.find(sep)
-            if idx != -1:
-                title       = raw[:idx].strip()
-                description = raw[idx + len(sep):].strip()
-            else:
-                # No separator — use full text as description, empty title
-                title       = ""
-                description = raw
-            return title, description
-
+        # ── Step 1: flat string array per category ────────────────────
         print("[INFO] Loading AG News dataset...")
         dataset = load_dataset("ag_news", split="train")
         print(f"[INFO] Dataset loaded — {len(dataset)} total records")
@@ -205,19 +142,10 @@ services:
                 continue
             if len(corpus[category]) >= MAX_PER_CAT:
                 continue
-
-            title, description = split_title_description(row["text"])
-
-            corpus[category].append({
-                "title":       title,
-                "description": description,
-            })
-
-            # Stop early once all categories are full
+            corpus[category].append(row["text"].strip())
             if all(len(v) >= MAX_PER_CAT for v in corpus.values()):
                 break
 
-        # Save one JSON array file per category
         total = 0
         for category, records in corpus.items():
             fpath = f"{SAVE_DIR}/{category}.json"
@@ -225,14 +153,30 @@ services:
                 json.dump(records, f, ensure_ascii=False, indent=2)
             total += len(records)
             print(f"[INFO] {category:12s} → {len(records):6d} records → {fpath}")
-
-            # Print first record as sanity check
             if records:
-                sample = records[0]
-                print(f"       sample title : {sample['title'][:60]}")
-                print(f"       sample desc  : {sample['description'][:60]}")
+                print(f"       sample: {records[0][:80]}")
+
+        print(f"[INFO] Step 1 done — {total} total records")
+
+        # ── Step 2: combine into single corpus.json ───────────────────
+        print("[INFO] Building corpus.json ...")
+
+        combined = []
+        for fname in sorted(os.listdir(SAVE_DIR)):
+            if not fname.endswith(".json") or fname == "corpus.json":
+                continue
+            title = fname.replace(".json", "")
+            with open(f"{SAVE_DIR}/{fname}", "r", encoding="utf-8") as f:
+                entries = json.load(f)
+            for description in entries:
+                combined.append({"title": title, "description": description})
+            print(f"[INFO] {title:12s} → {len(entries)} entries added")
+
+        with open(f"{SAVE_DIR}/corpus.json", "w", encoding="utf-8") as f:
+            json.dump(combined, f, ensure_ascii=False, indent=2)
 
         print("=" * 60)
-        print(f"Done. {total} total records saved to {SAVE_DIR}")
+        print(f"Done. corpus.json → {len(combined)} total records")
+        print(f"sample: {json.dumps(combined[0], ensure_ascii=False)[:120]}")
         print("=" * 60)
         EOF
